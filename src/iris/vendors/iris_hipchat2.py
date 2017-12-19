@@ -9,7 +9,7 @@ from iris.constants import SMS_SUPPORT, CALL_SUPPORT
 logger = logging.getLogger(__name__)
 
 
-class iris_hipchat(object):
+class iris_hipchat2(object):
     supports = frozenset([SMS_SUPPORT, CALL_SUPPORT])
 
     def __init__(self, config):
