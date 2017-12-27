@@ -4,7 +4,6 @@
 import requests
 from requests.exceptions import RequestException
 import logging
-from datetime import datetime
 from iris.metrics import stats
 
 logger = logging.getLogger(__name__)
@@ -18,7 +17,6 @@ class oncall(object):
         self.requests.headers = headers
         self.requests.verify = False
         self.endpoint = config['oncall-api'] + '/api/v0'
-        self.holidays = config.get('holidays', [])
 
     def call_oncall(self, url):
         url = str(self.endpoint + url)
@@ -59,17 +57,6 @@ class oncall(object):
         elif role.startswith('oncall'):
             oncall_type = 'primary' if role == 'oncall' else role[7:]
             result = self.call_oncall('/teams/%s/oncall/%s' % (target, oncall_type))
-
-            # if we take holidays into consideration
-            # we'll not return any users
-            if role[-9:] == "-exclude-holidays":
-                now = datetime.now()
-                for holiday in self.holidays:
-                    start = datetime.strptime(holiday['start'], '%d/%m/%Y %H:%M')
-                    end = datetime.strptime(holiday['end'], '%d/%m/%Y %H:%M')
-                    if start < now < end:
-                        return None
-
             if not isinstance(result, list):
                 stats['oncall_error'] += 1
                 return None
