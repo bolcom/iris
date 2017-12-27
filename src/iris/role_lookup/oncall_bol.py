@@ -10,7 +10,7 @@ from iris.metrics import stats
 logger = logging.getLogger(__name__)
 
 
-class oncall(object):
+class oncall_bol(object):
     def __init__(self, config):
         headers = requests.utils.default_headers()
         headers['User-Agent'] = 'iris role lookup (%s)' % headers.get('User-Agent')
