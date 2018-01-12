@@ -66,24 +66,6 @@ if pidfile:
         logger.exception('Failed writing pid to %s', pidfile)
 
 
-@contextmanager
-def guarded_session(engine):
-    '''
-    Context manager that will automatically close session on exceptions
-    '''
-    Session = sessionmaker(bind=engine)
-    try:
-        session = Session()
-        yield session
-    except (HTTPForbidden, HTTPUnauthorized, HTTPNotFound, HTTPBadRequest):
-        session.close()
-        raise
-    except Exception:
-        session.close()
-        logger.exception('SERVER ERROR')
-        raise
-
-
 def cache_priorities(engine):
     global priorities
     connection = engine.raw_connection()
@@ -247,11 +229,16 @@ def gen_where_filter_clause(connection, filters, filter_types, kwargs):
     return where
 
 
-def deactivate_plan(engine, plan_name):
-    # TODO just deactivate.. or use prune_target????
-    plan_query = '''SELECT * FROM `plan` JOIN `target` ON `plan`.`user_id` = `target`.`id`
-    LEFT OUTER JOIN `plan_active` ON `plan`.`id` = `plan_active`.`plan_id`
-    WHERE `plan`.`name`="%s"'''
+def deactivate_plan(engine, plan_id):
+    plan_query = '''DELETE FROM `plan_active` WHERE `plan_id`=%s'''
+
+    query = plan_query % plan_id
+    engine.execute(query)
+
+
+def get_plan_id(engine, plan_name):
+    plan_query = '''SELECT `id` FROM `plan`
+    WHERE `name`="%s"'''
 
     query = plan_query % plan_name
 
@@ -259,14 +246,14 @@ def deactivate_plan(engine, plan_name):
 
     cursor = connection.cursor(engine.dialect.dbapi.cursors.DictCursor)
     cursor.execute(query)
-    plan = cursor.fetchone()
+    plan_id = cursor.fetchone()
 
     connection.close()
 
-    if plan:
-        return ujson.dumps(plan)
+    if not plan_id:
+        return None
 
-    return False
+    return plan_id['id']
 
 
 def get_plan(engine, plan_name):
@@ -373,7 +360,7 @@ def get_target(engine, target):
     return target_id
 
 
-def valid_scrumteam_plan(engine, plan, team):
+def valid_scrumteam_plan(engine, plan, team, plan_opts):
     # compare plans
     ignore_plan_fields = ['created', 'user_id', 'name', 'id', 'plan_id', 'plan_active.name']
 
@@ -414,9 +401,10 @@ def valid_scrumteam_plan(engine, plan, team):
     oncall_primary_role_id = get_target_role(engine, "oncall-primary")
     oncall_primary_exclude_holidays_role_id = get_target_role(engine, "oncall-primary-exclude-holidays")
     team_target_id = get_target(engine, team)
-    eod_target_id = get_target(engine, "eod")
-    srt_target_id = get_target(engine, "srt1")
-    mod_target_id = get_target(engine, "mod")
+
+    eod_target_id = get_target(engine, plan_opts['standby_team'])
+    mod_target_id = get_target(engine, plan_opts['standby_escalation_team'])
+    srt_target_id = get_target(engine, plan_opts['escalation_team'])
 
     valid_plan_notification = [
             {
@@ -460,6 +448,8 @@ def valid_scrumteam_plan(engine, plan, team):
 
     if not cmp(valid_plan_notification, sane_plan_notification) == 0:
         logger.info("Plan notification %s needs fixing", plan['plan_active.name'])
+        logger.info("valid: %s", valid_plan_notification)
+        logger.info("got: %s", sane_plan_notification)
         return False
 
     return True
@@ -504,8 +494,8 @@ def fetch_plans(engine):
 
 
 # Provision a default scrum team plan
-def create_scrumteam_plan(engine, team, plan_name):
-    logger.info("Creating default scrum team plan for %s", team)
+def create_plan(engine, team, plan_name, plan_type, extra_opts):
+    logger.info("Creating default %s plan for %s", plan_type, team)
     insert_plan_query = '''REPLACE INTO `plan` (
         `user_id`, `name`, `created`, `description`, `step_count`,
         `threshold_window`, `threshold_count`, `aggregation_window`,
@@ -529,12 +519,104 @@ def create_scrumteam_plan(engine, team, plan_name):
 
     now = datetime.datetime.utcnow()
 
+    default_template = "test_template"
+    default_wait = 500
+    default_repeat = 4  # $repeat * $wait = escal time
+    default_priority = "urgent"
+
+    plan_description = ""
+    step_count = 0
+    all_steps = []
+    if plan_type == 'scrumteam':
+        plan_description = 'Escalation and after hours support by SRT, EOD and MOD'
+        step_count = 1
+        all_steps = [
+            [
+                {
+                    "priority": default_priority
+                    "repeat": default_repeat,
+                    "role": "oncall-primary-exclude-holidays",
+                    "target": team,
+                    "template": default_template,
+                    "wait": default_wait
+                },
+                {
+                    "priority": default_priority,
+                    "repeat": default_repeat,
+                    "role": "oncall-primary",
+                    "target": extra_opts['standby_team'],
+                    "template": default_template,
+                    "wait": default_wait
+                }
+            ],
+            [
+                {
+                    "priority": default_priority,
+                    "repeat": 0,
+                    "role": "oncall-primary-exclude-holidays",
+                    "target": extra_opts['escalation_team'],
+                    "template": default_template,
+                    "wait": 0
+                },
+                {
+                    "priority": default_priority,
+                    "repeat": 0,
+                    "role": "oncall-primary",
+                    "target": extra_opts['standby_escalation_team'],
+                    "template": default_template,
+                    "wait": 0
+                }
+            ]
+        ]
+    elif plan_type == 'standby':
+        plan_description = 'Standby plan with escalation'
+        step_count = 0
+        all_steps = [
+            [
+                {
+                    "priority": default_priority,
+                    "repeat": 4,
+                    "role": "oncall-primary",
+                    "target": team,
+                    "template": default_template,
+                    "wait": default_wait
+                }
+            ],
+            [
+                {
+                    "priority": default_priority,
+                    "repeat": 4,
+                    "role": "oncall-primary",
+                    "target": extra_opts['escalation_team'],
+                    "template": default_template,
+                    "wait": 0
+                }
+            ]
+        ]
+    elif plan_type == 'private':
+        plan_description = 'Simple plan without escalation'
+        step_count = 0
+        all_steps = [
+            [
+                {
+                    "priority": default_priority,
+                    "repeat": 4,
+                    "role": "oncall-primary",
+                    "target": team,
+                    "template": default_template,
+                    "wait": default_wait
+                }
+            ]
+        ]
+    else:
+        logger.info("Unknown plan type '%s' requested", plan_type)
+
     plan_dict = {
         'creator': 'dummy',
         'name': plan_name,
         'created': now,
-        'description': 'Escalation and after hours support by SRT, EOD and MOD',
-        'step_count': 1,
+        'description': plan_description,
+        'step_count': step_count,
         'threshold_window': 900,
         'threshold_count': 10,
         'aggregation_window': 300,
@@ -558,45 +640,6 @@ def create_scrumteam_plan(engine, team, plan_name):
         :repeat,
         :wait
     )'''
-
-    all_steps = [
-        [
-            {
-                "priority": "urgent",
-                "repeat": 4,  # $repeat * $wait = escal time
-                "role": "oncall-primary-exclude-holidays",
-                "target": team,
-                "template": "test_template",
-                "wait": 300
-            },
-            {
-                "priority": "urgent",
-                "repeat": 4,
-                "role": "oncall-primary",
-                "target": 'eod',
-                "template": "test_template",
-                "wait": 300
-            }
-        ],
-        [
-            {
-                "priority": "urgent",
-                "repeat": 0,
-                "role": "oncall-primary-exclude-holidays",
-                "target": 'srt1',
-                "template": "test_template",
-                "wait": 0
-            },
-            {
-                "priority": "urgent",
-                "repeat": 0,
-                "role": "oncall-primary",
-                "target": 'mod',
-                "template": "test_template",
-                "wait": 0
-            }
-        ]
-    ]
 
     get_allowed_roles_query = '''SELECT `target_role`.`id`
                                 FROM `target_role`
@@ -674,7 +717,7 @@ def insert_user(engine, username, target_types, modes, oncall_users):
     target_add_sql = 'INSERT INTO `target` (`name`, `type_id`) VALUES (%s, %s) ON DUPLICATE KEY UPDATE `active` = TRUE'
 
 
-    logger.info('Inserting %s' % username)
+    logger.info('Inserting user target %s' % username)
     try:
         target_id = engine.execute(target_add_sql, (username, target_types['user'])).lastrowid
         engine.execute(user_add_sql, (target_id, ))
@@ -694,7 +737,7 @@ def insert_user(engine, username, target_types, modes, oncall_users):
 def insert_team(engine, team, target_types):
     target_add_sql = 'INSERT INTO `target` (`name`, `type_id`) VALUES (%s, %s) ON DUPLICATE KEY UPDATE `active` = TRUE'
 
-    logger.info('Inserting %s' % team)
+    logger.info('Inserting team target %s' % team)
     try:
         target_id = engine.execute(target_add_sql, (team, target_types['team'])).lastrowid
         metrics.incr('teams_added')
@@ -733,6 +776,47 @@ def update_user(engine, username, iris_users, oncall_users, modes):
         metrics.incr('sql_errors')
         logger.exception('Failed to update user %s' % username)
         return
+
+
+def get_team_srt(config, team):
+    #TODO: map scrumteams to SRTs
+    srt = 'srt1'
+    return srt
+
+
+def get_teams_default_plans(config, team):
+    srt_suffix = '-with-srt'
+    private_suffix = '-private'
+    scrumteam_prefix = 'ad-team'
+
+    srt_teams = config['sync_script']['srt_teams']
+    platform_teams = config['sync_script']['platform_teams']
+    standby_teams = config['sync_script']['standby_teams']
+    standby_escalation_teams = config['sync_script']['standby_teams']
+
+    plans = []
+    if team.startswith(scrumteam_prefix):
+        plans.append({'name': team + srt_suffix, 'type': 'scrumteam', 'extra_opts': {
+            'escalation_team': get_team_srt(config, team),
+            'standby_team': 'eod',
+            'standby_escalation_team': 'mod'
+        }})
+        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
+    elif team in srt_teams or "srt" in team:
+        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
+    elif team in platform_teams:
+        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
+    elif team in standby_teams:
+        plans.append({'name': team + private_suffix, 'type': 'standby', 'extra_opts': {
+            'escalation_team': 'mod'
+        }})
+        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
+    elif team in standby_escalation_teams:
+        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
+    else:
+        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
+
+    return plans
 
 
 def sync_from_oncall(config, engine, purge_old_users=True):
@@ -789,6 +873,7 @@ def sync_from_oncall(config, engine, purge_old_users=True):
 
     # sync teams between iris and oncall
     teams_to_insert = oncall_team_names - iris_team_names
+    teams_to_update = oncall_team_names & iris_team_names
     teams_to_deactivate = iris_team_names - oncall_team_names
 
     logger.info('Teams to insert (%d)', len(teams_to_insert))
@@ -796,18 +881,18 @@ def sync_from_oncall(config, engine, purge_old_users=True):
         insert_team(engine, team, target_types)
 
     # provision default plans
-    logger.info('Plans with SRT Support to check (%d)', len(oncall_team_names))
-    for team in oncall_team_names:
-        # scrum team plans
-        if team.startswith('ad-team'):
-            plan_name = team + "-with-srt-support"
-            plan = get_plan(engine, plan_name)
+    logger.info('Plans to insert (%d)', len(teams_to_insert))
+    for team in teams_to_insert:
+        for plan in get_teams_default_plans(config, team):
+            create_plan(engine, team, plan['name'], plan['type'], plan['extra_opts'])
 
-            if not plan or not valid_scrumteam_plan(engine, plan, team):
-                create_scrumteam_plan(engine, team, plan_name)
-        else:
-            # TODO: non-scrum team plans like srts and such
-            logger.info("non scrum team plan: %s", team)
+    logger.info('Plans to check (%d)', len(teams_to_insert))
+    for team in teams_to_update:
+        for plan in get_teams_default_plans(config, team):
+            if plan['type'] == 'scrumteam':
+                plan_dict = get_plan(engine, plan['name'])
+                if not plan_dict or not valid_scrumteam_plan(engine, plan_dict, team, plan['extra_opts']):
+                    create_plan(engine, team, plan['name'], plan['type'], plan['extra_opts'])
 
     # mark users/teams/plans inactive
     if purge_old_users:
@@ -817,9 +902,10 @@ def sync_from_oncall(config, engine, purge_old_users=True):
         for team in teams_to_deactivate:
             prune_target(engine, team, 'team')
 
-            # scrum team plans
-            if team.startswith('ad-team'):
-                deactivate_plan(engine, team + "-with-srt-support")
+            for plan in get_teams_default_plans(config, team):
+                plan_id = get_plan_id(engine, plan['name'])
+                if plan_id:
+                    deactivate_plan(engine, plan_id)
 
     session.commit()
     session.close()
