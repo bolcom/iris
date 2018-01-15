@@ -18,6 +18,7 @@ from phonenumbers import format_number, parse, PhoneNumberFormat
 from phonenumbers.phonenumberutil import NumberParseException
 
 import ujson
+import yaml
 
 from iris.api import load_config
 from iris import metrics
@@ -64,6 +65,28 @@ if pidfile:
             logger.info('Wrote pid %s to %s', pid, pidfile)
     except IOError:
         logger.exception('Failed writing pid to %s', pidfile)
+
+
+class DictDiffer(object):
+    """
+    Calculate the difference between two dictionaries as:
+    (1) items added
+    (2) items removed
+    (3) keys same in both but changed values
+    (4) keys same in both and unchanged values
+    """
+    def __init__(self, current_dict, past_dict):
+        self.current_dict, self.past_dict = current_dict, past_dict
+        self.set_current, self.set_past = set(current_dict.keys()), set(past_dict.keys())
+        self.intersect = self.set_current.intersection(self.set_past)
+    def added(self):
+        return self.set_current - self.intersect
+    def removed(self):
+        return self.set_past - self.intersect
+    def changed(self):
+        return set(o for o in self.intersect if self.past_dict[o] != self.current_dict[o])
+    def unchanged(self):
+        return set(o for o in self.intersect if self.past_dict[o] == self.current_dict[o])
 
 
 def cache_priorities(engine):
@@ -448,8 +471,12 @@ def valid_scrumteam_plan(engine, plan, team, plan_opts):
 
     if not cmp(valid_plan_notification, sane_plan_notification) == 0:
         logger.info("Plan notification %s needs fixing", plan['plan_active.name'])
-        logger.info("valid: %s", valid_plan_notification)
-        logger.info("got: %s", sane_plan_notification)
+        for idx, _ in enumerate(valid_plan_notification):
+            logger.info("Step %s", idx)
+            d = DictDiffer(valid_plan_notification[idx], sane_plan_notification[idx])
+            logger.info("Added: %s", d.added())
+            logger.info("Removed: %s", d.removed())
+            logger.info("Changed: %s", d.changed())
         return False
 
     return True
@@ -520,7 +547,7 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
     now = datetime.datetime.utcnow()
 
     default_template = "test_template"
-    default_wait = 500
+    default_wait = 300
     default_repeat = 4  # $repeat * $wait = escal time
     default_priority = "urgent"
 
@@ -533,7 +560,7 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
         all_steps = [
             [
                 {
-                    "priority": default_priority
+                    "priority": default_priority,
                     "repeat": default_repeat,
                     "role": "oncall-primary-exclude-holidays",
                     "target": team,
@@ -778,40 +805,51 @@ def update_user(engine, username, iris_users, oncall_users, modes):
         return
 
 
-def get_team_srt(config, team):
-    #TODO: map scrumteams to SRTs
-    srt = 'srt1'
-    return srt
-
-
 def get_teams_default_plans(config, team):
     srt_suffix = '-with-srt'
+    mod_suffix = '-with-mod'
     private_suffix = '-private'
     scrumteam_prefix = 'ad-team'
+    sane_team = team.replace("ad-", "")
 
-    srt_teams = config['sync_script']['srt_teams']
     platform_teams = config['sync_script']['platform_teams']
     standby_teams = config['sync_script']['standby_teams']
-    standby_escalation_teams = config['sync_script']['standby_teams']
+    standby_escalation_teams = config['sync_script']['standby_escalation_teams']
+    teamsfile = config['sync_script']['scrumteams_file']
+
+
+    scrumteams = {}
+    with open(teamsfile, 'r') as stream:
+        try:
+            scrumteams = yaml.load(stream)
+        except yaml.YAMLError as err:
+            logger.info(err)
 
     plans = []
     if team.startswith(scrumteam_prefix):
-        plans.append({'name': team + srt_suffix, 'type': 'scrumteam', 'extra_opts': {
-            'escalation_team': get_team_srt(config, team),
-            'standby_team': 'eod',
-            'standby_escalation_team': 'mod'
+        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
+
+        # lookup supporting srt
+        space_to_srt_mapping = config['sync_script']['space_to_srt_team']
+        if sane_team in scrumteams:
+            space = scrumteams[sane_team]['space']
+            srt = "ad-" + space_to_srt_mapping[space]
+            plans.append({'name': team + srt_suffix, 'type': 'scrumteam', 'extra_opts': {
+                'escalation_team': srt,
+                'standby_team': 'eod',
+                'standby_escalation_team': 'ad-bol-mod'
+            }})
+        else:
+            logger.warn("Couldn't find team %s in scrumteam hash", sane_team)
+
+    elif sane_team in platform_teams:
+        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
+    elif sane_team in standby_teams:
+        plans.append({'name': team + mod_suffix, 'type': 'standby', 'extra_opts': {
+            'escalation_team': 'ad-bol-mod'
         }})
         plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
-    elif team in srt_teams or "srt" in team:
-        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
-    elif team in platform_teams:
-        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
-    elif team in standby_teams:
-        plans.append({'name': team + private_suffix, 'type': 'standby', 'extra_opts': {
-            'escalation_team': 'mod'
-        }})
-        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
-    elif team in standby_escalation_teams:
+    elif sane_team in standby_escalation_teams:
         plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
     else:
         plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
