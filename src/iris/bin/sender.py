@@ -447,7 +447,20 @@ def escalate():
                         html_body = 'plan %s - tracking notification html body failed to render: %s' % (plan['name'], str(e))
                         logger.exception(html_body)
                     tracking_message['email_html'] = html_body
-                message_send_enqueue(tracking_message)
+            else:
+                tracking_message = {
+                    'noreply': True,
+                    'destination': tracking_key,
+                    'mode': tracking_type
+                }
+                try:
+                    body = app_tracking_template['body'].render(**context)
+                except Exception as e:
+                    body = 'plan %s - tracking notification body failed to render: %s' % (plan['name'], str(e))
+                    logger.exception(body)
+                tracking_message['body'] = body
+
+            message_send_enqueue(tracking_message)
     cursor.close()
 
     new_incidents_count = len(escalations)
