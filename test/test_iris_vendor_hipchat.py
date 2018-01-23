@@ -18,7 +18,7 @@ def test_message_construction_for_incident():
         'incident_id': 123,
         'body': u'test body',
         'message_id': 456,
-        'destination': 'user1'
+        'destination': '@user1'
     }
     msg_payload = hipchat_vendor.get_message_payload(fake_msg)
     assert msg_payload['message'] == '@user1 %s' % fake_msg['body']
