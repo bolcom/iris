@@ -61,7 +61,7 @@ class iris_hipchat(object):
             if len(dparts) == 3:
                 room_id = dparts[0]
                 token = dparts[1]
-                mention = dparts[3]
+                mention = dparts[2]
             elif len(dparts) == 2:
                 room_id = dparts[0]
                 token = dparts[1]
