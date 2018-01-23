@@ -59,11 +59,19 @@ class iris_hipchat(object):
         elif ";" in destination:
             dparts = destination.split(";")
             if len(dparts) == 3:
-                room_id = dparts[0]
+                try:
+                    int(dparts[0])
+                    room_id = dparts[0]
+                except ValueError:
+                    pass
                 token = dparts[1]
-                mention = dparts[3]
+                mention = dparts[2]
             elif len(dparts) == 2:
-                room_id = dparts[0]
+                try:
+                    int(dparts[0])
+                    room_id = dparts[0]
+                except ValueError:
+                    pass
                 token = dparts[1]
             else:
                 logger.error("Invalid destination: %s", destination)
