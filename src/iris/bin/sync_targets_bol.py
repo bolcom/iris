@@ -429,6 +429,7 @@ def valid_scrumteam_plan(engine, plan, team, plan_opts):
     mod_target_id = get_target(engine, plan_opts['standby_escalation_team'])
     srt_target_id = get_target(engine, plan_opts['escalation_team'])
 
+    template = 'default'
     valid_plan_notification = [
             {
                 u'dynamic_index': None,
@@ -437,7 +438,7 @@ def valid_scrumteam_plan(engine, plan, team, plan_opts):
                 u'role_id': oncall_primary_exclude_holidays_role_id,
                 u'step': 1,
                 u'target_id': team_target_id,
-                u'template': u'test_template',
+                u'template': template,
                 u'wait': 300
             },
             {   u'dynamic_index': None,
@@ -446,7 +447,7 @@ def valid_scrumteam_plan(engine, plan, team, plan_opts):
                 u'role_id': oncall_primary_role_id,
                 u'step': 1,
                 u'target_id': eod_target_id,
-                u'template': u'test_template',
+                u'template': template,
                 u'wait': 300
             },
             {   u'dynamic_index': None,
@@ -455,7 +456,7 @@ def valid_scrumteam_plan(engine, plan, team, plan_opts):
                 u'role_id': oncall_primary_exclude_holidays_role_id,
                 u'step': 2,
                 u'target_id': srt_target_id,
-                u'template': u'test_template',
+                u'template': template,
                 u'wait': 0
             },
             {   u'dynamic_index': None,
@@ -464,7 +465,7 @@ def valid_scrumteam_plan(engine, plan, team, plan_opts):
                 u'role_id': oncall_primary_role_id,
                 u'step': 2,
                 u'target_id': mod_target_id,
-                u'template': u'test_template',
+                u'template': template,
                 u'wait': 0
             }
         ]
@@ -546,7 +547,7 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
 
     now = datetime.datetime.utcnow()
 
-    default_template = "test_template"
+    default_template = "default"
     default_wait = 300
     default_repeat = 4  # $repeat * $wait = escal time
     default_priority = "urgent"
