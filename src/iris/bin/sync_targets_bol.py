@@ -462,12 +462,12 @@ def valid_scrumteam_plan(engine, plan, team, plan_opts):
             },
             {   u'dynamic_index': None,
                 u'priority_id': prio_urgent_id,
-                u'repeat': 0,
+                u'repeat': 2,
                 u'role_id': oncall_primary_role_id,
                 u'step': 2,
                 u'target_id': mod_target_id,
                 u'template': template,
-                u'wait': 0
+                u'wait': 900
             }
         ]
 
