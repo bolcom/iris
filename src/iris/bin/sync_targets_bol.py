@@ -420,6 +420,7 @@ def valid_scrumteam_plan(engine, plan, team, plan_opts):
         for field in ignore_plan_notification_fields:
             sane_plan_notification[idx].pop(field)
 
+    prio_high_id = get_priority(engine, "high")
     prio_urgent_id = get_priority(engine, "urgent")
     oncall_primary_role_id = get_target_role(engine, "oncall-primary")
     oncall_primary_exclude_holidays_role_id = get_target_role(engine, "oncall-primary-exclude-holidays")
@@ -433,7 +434,7 @@ def valid_scrumteam_plan(engine, plan, team, plan_opts):
     valid_plan_notification = [
             {
                 u'dynamic_index': None,
-                u'priority_id': prio_urgent_id,
+                u'priority_id': prio_high_id,
                 u'repeat': 4,
                 u'role_id': oncall_primary_exclude_holidays_role_id,
                 u'step': 1,
@@ -442,7 +443,7 @@ def valid_scrumteam_plan(engine, plan, team, plan_opts):
                 u'wait': 300
             },
             {   u'dynamic_index': None,
-                u'priority_id': prio_urgent_id,
+                u'priority_id': prio_high_id,
                 u'repeat': 4,
                 u'role_id': oncall_primary_role_id,
                 u'step': 1,
@@ -451,7 +452,7 @@ def valid_scrumteam_plan(engine, plan, team, plan_opts):
                 u'wait': 300
             },
             {   u'dynamic_index': None,
-                u'priority_id': prio_urgent_id,
+                u'priority_id': prio_high_id,
                 u'repeat': 0,
                 u'role_id': oncall_primary_exclude_holidays_role_id,
                 u'step': 2,
@@ -550,7 +551,8 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
     default_template = "default"
     default_wait = 300
     default_repeat = 4  # $repeat * $wait = escal time
-    default_priority = "urgent"
+    default_priority = "high"
+    default_standby_escalation_priority = "urgent"
 
     plan_description = ""
     step_count = 0
@@ -587,7 +589,7 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
                     "wait": 0
                 },
                 {
-                    "priority": default_priority,
+                    "priority": default_standby_escalation_priority,
                     "repeat": 0,
                     "role": "oncall-primary",
                     "target": extra_opts['standby_escalation_team'],
@@ -612,7 +614,7 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
             ],
             [
                 {
-                    "priority": default_priority,
+                    "priority": default_standby_escalation_priority,
                     "repeat": 4,
                     "role": "oncall-primary",
                     "target": extra_opts['escalation_team'],
