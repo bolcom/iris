@@ -80,10 +80,7 @@ sender:
   #zookeeper_cluster: localhost:2181
 
   # Disable the gmail based iris-sender watchdog process
-  disable_gwatch_renewer_task: True
-
-  # Enable this and the above setting, to mock gwatch_renewer
-  #mock_gwatch_renewer_task: False
+  disable_gwatch_renewer: True
 
   ## If you're not using zookeeper, the following determines
   ## whether this sender is a master and you hard code in
@@ -238,3 +235,16 @@ sync_script_nap_time: 3600 # wait time before syncing again
 #  api_host: http://localhost:16649
 #  sleep_interval: 60
 #
+
+#####################
+### Iris-process-retention
+#####################
+## To automatically prune DB of messages & incidents older than $x days
+#
+#retention:
+#  enabled: True
+#  max_days: 180  # Max age of incidents/messages to kill
+#  archive_path: /path/to/iris/backup  # Path to be populated with the deleted messages/incidents for later reference
+#  batch_size: 10000  # Do this many incidents/messages at a time, to avoid overloading mysql
+#  cooldown_time: 1  # Wait this many seconds between iterations of above
+#  run_interval: 86400  # Run retention loop every this many seconds

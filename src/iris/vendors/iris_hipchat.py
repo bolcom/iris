@@ -24,7 +24,7 @@ class iris_hipchat(object):
             self.proxy = {'http': 'http://%s:%s' % (host, port),
                           'https': 'https://%s:%s' % (host, port)}
         self.token = self.config.get('auth_token')
-        self.room_id = self.config.get('room_id')
+        self.room_id = int(self.config.get('room_id'))
         self.debug = self.config.get('debug')
         self.endpoint_url = self.config.get('base_url')
 
@@ -47,8 +47,8 @@ class iris_hipchat(object):
         """Determine room_id, token and user to mention
            We accept 3 formats:
              - Just a mention (@testuser)
-             - Room_id and Token (12341:a20asdfgjahdASDfaskw)
-             - Room_id, Token and mention (12341:a20asdfgjahdASDfaskw;@testuser)
+             - Room_id and Token (12341;a20asdfgjahdASDfaskw)
+             - Room_id, Token and mention (12341;a20asdfgjahdASDfaskw;@testuser)
         """
         room_id = self.room_id
         token = self.token
@@ -60,23 +60,21 @@ class iris_hipchat(object):
             dparts = destination.split(";")
             if len(dparts) == 3:
                 try:
-                    int(dparts[0])
-                    room_id = dparts[0]
+                    room_id = int(dparts[0])
                 except ValueError:
-                    pass
+                    logger.error("Invalid destination: %s. Using default room_id", destination)
                 token = dparts[1]
                 mention = dparts[2]
             elif len(dparts) == 2:
                 try:
-                    int(dparts[0])
-                    room_id = dparts[0]
+                    room_id = int(dparts[0])
                 except ValueError:
-                    pass
+                    logger.error("Invalid destination: %s. Using default room_id", destination)
                 token = dparts[1]
             else:
-                logger.error("Invalid destination: %s", destination)
+                logger.error("Invalid destination: %s. Contains %s fields.", destination, len(dparts))
         else:
-                logger.error("Invalid destination: %s", destination)
+            logger.error("Invalid destination: %s. Neither @user or ; separated value.", destination)
 
         return room_id, token, mention
 
