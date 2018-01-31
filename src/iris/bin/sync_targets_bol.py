@@ -26,14 +26,36 @@ from iris import metrics
 
 logging.getLogger('requests').setLevel(logging.WARNING)
 
+immutable_prefix = 'ad-'
+scrumteam_prefix = immutable_prefix + 'team'
+srt_suffix = '-with-srt'
+mod_suffix = '-with-mod'
+private_suffix = '-private'
+middleware_team = 'bol-tam'
+mod_team = 'bol-mod'
 
 default_template = "default"
 default_wait = 1600
 default_repeat = 0  # $repeat * $wait = escal time
-default_escalation_repeat = 0
-default_escalation_wait = 0
+default_escalation_repeat = 1
+default_escalation_wait = 900
 default_priority = "high"
 default_standby_escalation_priority = "urgent"
+
+ignore_plan_fields = ['created',
+                      'aggregation_reset',
+                      'aggregation_window',
+                      'id',
+                      'name',
+                      'plan_active.name',
+                      'plan_id',
+                      'threshold_count',
+                      'threshold_window',
+                      'tracking_key',
+                      'tracking_template',
+                      'tracking_type',
+                      'user_id',
+                     ]
 
 stats_reset = {
     'sql_errors': 0,
@@ -393,23 +415,15 @@ def get_target(engine, target):
 
 def valid_scrumteam_plan(engine, plan, team, plan_opts):
     # compare plans
-    ignore_plan_fields = ['created', 'user_id', 'name', 'id', 'plan_id', 'plan_active.name']
 
     sane_plan = plan.copy()
     for field in ignore_plan_fields:
         sane_plan.pop(field)
 
     valid_plan = {
-        u'aggregation_reset': 300,
-        u'aggregation_window': 300,
         u'description': u'Escalation and after hours support by SRT, EOD and MOD',
         u'step_count': 1,
-        u'threshold_count': 10,
-        u'threshold_window': 900,
-        u'tracking_key': None,
-        u'tracking_template': None,
-        u'tracking_type': None,
-        u'team_id': None
+        u'team_id': None,
     }
 
     if not cmp(valid_plan, sane_plan) == 0:
@@ -473,6 +487,15 @@ def valid_scrumteam_plan(engine, plan, team, plan_opts):
                 u'repeat': default_escalation_repeat,
                 u'role_id': oncall_primary_role_id,
                 u'step': 2,
+                u'target_id': eod_target_id,
+                u'template': template,
+                u'wait': default_escalation_wait,
+            },
+            {   u'dynamic_index': None,
+                u'priority_id': prio_urgent_id,
+                u'repeat': default_escalation_repeat,
+                u'role_id': oncall_primary_role_id,
+                u'step': 3,
                 u'target_id': mod_target_id,
                 u'template': template,
                 u'wait': default_escalation_wait,
@@ -594,6 +617,16 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
                     "priority": default_standby_escalation_priority,
                     "repeat": default_escalation_repeat,
                     "role": "oncall-primary",
+                    "target": extra_opts['standby_team'],
+                    "template": default_template,
+                    "wait": default_escalation_wait,
+                }
+            ],
+            [
+                {
+                    "priority": default_standby_escalation_priority,
+                    "repeat": default_escalation_repeat,
+                    "role": "oncall-primary",
                     "target": extra_opts['standby_escalation_team'],
                     "template": default_template,
                     "wait": default_escalation_wait,
@@ -612,6 +645,16 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
                     "target": team,
                     "template": default_template,
                     "wait": default_wait,
+                }
+            ],
+            [
+                {
+                    "priority": default_standby_escalation_priority,
+                    "repeat": default_escalation_repeat,
+                    "role": "oncall-primary",
+                    "target": team,
+                    "template": default_template,
+                    "wait": default_escalation_wait,
                 }
             ],
             [
@@ -698,6 +741,9 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
 
             if not allowed_roles:
                 session.close()
+                logger.warn("No result for: %s", get_allowed_roles_query)
+                logger.warn("With input: %s", step)
+                logger.warn("extra_opts: %s", extra_opts)
                 raise HTTPBadRequest(
                     'Invalid plan',
                     'Target %s not found for step %s' % (step['target'], index))
@@ -811,17 +857,12 @@ def update_user(engine, username, iris_users, oncall_users, modes):
 
 
 def get_teams_default_plans(config, team):
-    srt_suffix = '-with-srt'
-    mod_suffix = '-with-mod'
-    private_suffix = '-private'
-    scrumteam_prefix = 'ad-team'
-    sane_team = team.replace("ad-", "")
+    sane_team = team.replace(immutable_prefix, "")
 
     platform_teams = config['sync_script']['platform_teams']
     standby_teams = config['sync_script']['standby_teams']
     standby_escalation_teams = config['sync_script']['standby_escalation_teams']
     teamsfile = config['sync_script']['scrumteams_file']
-
 
     scrumteams = {}
     with open(teamsfile, 'r') as stream:
@@ -838,20 +879,20 @@ def get_teams_default_plans(config, team):
         space_to_srt_mapping = config['sync_script']['space_to_srt_team']
         if sane_team in scrumteams:
             space = scrumteams[sane_team]['space']
-            srt = "ad-" + space_to_srt_mapping[space]
+            srt = immutable_prefix + space_to_srt_mapping[space]
             plans.append({'name': team + srt_suffix, 'type': 'scrumteam', 'extra_opts': {
                 'escalation_team': srt,
-                'standby_team': 'eod',
-                'standby_escalation_team': 'ad-bol-mod'
+                'standby_team': immutable_prefix + middleware_team,
+                'standby_escalation_team': immutable_prefix + mod_team,
             }})
         else:
-            logger.warn("Couldn't find team %s in scrumteam hash", sane_team)
+            logger.warn("Skipping srt supported plan Creation. Couldn't find team %s in scrumteam hash", sane_team)
 
     elif sane_team in platform_teams:
         plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
     elif sane_team in standby_teams:
         plans.append({'name': team + mod_suffix, 'type': 'standby', 'extra_opts': {
-            'escalation_team': 'ad-bol-mod'
+            'escalation_team': immutable_prefix + mod_team,
         }})
         plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
     elif sane_team in standby_escalation_teams:
