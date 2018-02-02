@@ -26,14 +26,22 @@ from iris import metrics
 
 logging.getLogger('requests').setLevel(logging.WARNING)
 
-immutable_prefix = 'ad-'
-scrumteam_prefix = immutable_prefix + 'team'
-srt_suffix = '-with-srt'
-mod_suffix = '-with-mod'
-private_suffix = '-private'
-middleware_team = 'bol-tam'
-mod_team = 'bol-mod'
+# used to detect scrumteams vs itops teams
+scrumteam_prefix = 'team'
 
+# all created objects are suffixed with:
+immutable_suffix = '-builtin'
+
+# used for plan naming
+srt_suffix = '-withsrt'
+mod_suffix = '-withmod'
+private_suffix = '-private'
+
+# used to point to teams that are used by plans
+middleware_team = 'middleware-standby'
+mod_team = 'mod-standby'
+
+# plan defaults
 default_template = "default"
 default_wait = 1600
 default_repeat = 0  # $repeat * $wait = escal time
@@ -414,6 +422,7 @@ def get_target(engine, target):
 
 
 def valid_scrumteam_plan(engine, plan, team, plan_opts):
+    # TODO: validate simple plans
     # compare plans
 
     sane_plan = plan.copy()
@@ -446,8 +455,8 @@ def valid_scrumteam_plan(engine, plan, team, plan_opts):
     prio_urgent_id = get_priority(engine, "urgent")
     oncall_primary_role_id = get_target_role(engine, "oncall-primary")
     oncall_primary_exclude_holidays_role_id = get_target_role(engine, "oncall-primary-exclude-holidays")
-    team_target_id = get_target(engine, team)
 
+    team_target_id = get_target(engine, plan_opts['team'])
     eod_target_id = get_target(engine, plan_opts['standby_team'])
     mod_target_id = get_target(engine, plan_opts['standby_escalation_team'])
     srt_target_id = get_target(engine, plan_opts['escalation_team'])
@@ -591,7 +600,7 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
                     "priority": default_priority,
                     "repeat": default_repeat,
                     "role": "oncall-primary-exclude-holidays",
-                    "target": team,
+                    "target": extra_opts['team'],
                     "template": default_template,
                     "wait": default_wait,
                 },
@@ -642,7 +651,7 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
                     "priority": default_priority,
                     "repeat": default_repeat,
                     "role": "oncall-primary",
-                    "target": team,
+                    "target": extra_opts['team'],
                     "template": default_template,
                     "wait": default_wait,
                 }
@@ -677,7 +686,37 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
                     "priority": default_priority,
                     "repeat": default_repeat,
                     "role": "oncall-primary",
-                    "target": team,
+                    "target": extra_opts['team'],
+                    "template": default_template,
+                    "wait": default_wait,
+                }
+            ]
+        ]
+    elif plan_type == 'private-workhours':
+        plan_description = 'Simple plan without escalation'
+        step_count = 0
+        all_steps = [
+            [
+                {
+                    "priority": default_priority,
+                    "repeat": default_repeat,
+                    "role": "oncall-primary",
+                    "target": extra_opts['team'],
+                    "template": default_template,
+                    "wait": default_wait,
+                }
+            ]
+        ]
+    elif plan_type == 'private-24x7':
+        plan_description = 'Simple plan without escalation'
+        step_count = 0
+        all_steps = [
+            [
+                {
+                    "priority": default_priority,
+                    "repeat": default_repeat,
+                    "role": "oncall-primary",
+                    "target": extra_opts['team'],
                     "template": default_template,
                     "wait": default_wait,
                 }
@@ -857,7 +896,8 @@ def update_user(engine, username, iris_users, oncall_users, modes):
 
 
 def get_teams_default_plans(config, team):
-    sane_team = team.replace(immutable_prefix, "")
+    sane_name = team.replace(immutable_suffix, "")
+    bol_teamname = sane_name.split('-')[0]
 
     platform_teams = config['sync_script']['platform_teams']
     standby_teams = config['sync_script']['standby_teams']
@@ -869,36 +909,52 @@ def get_teams_default_plans(config, team):
         try:
             scrumteams = yaml.load(stream)
         except yaml.YAMLError as err:
-            logger.info(err)
+            logger.error(err)
 
     plans = []
+
+    private_24x7_planname = bol_teamname + '-24x7' + private_suffix + immutable_suffix
+    private_24x7_teamname = bol_teamname + '-24x7' + immutable_suffix
+    private_workhours_planname = bol_teamname + '-workhours' + private_suffix + immutable_suffix
+    private_workhours_teamname = bol_teamname + '-workhours' + immutable_suffix
+    with_srt_planname = bol_teamname + '-24x7' + srt_suffix + immutable_suffix
+    with_srt_teamname = bol_teamname + '-workhours' + immutable_suffix
+    srt_with_mod_planname = bol_teamname + '-24x7' + mod_suffix + immutable_suffix
+    srt_with_mod_teamname = bol_teamname + '-workhours' + immutable_suffix
     if team.startswith(scrumteam_prefix):
-        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
+        # Scrumteams:
+        # - teamXX-24x7-private-builtin
+        # - teamXX-workhours-private-builtin
+        # - teamXX-24x7-withsrt-builtin
+        plans.append({'name': private_24x7_planname, 'type': 'private-24x7', 'extra_opts': {"team": private_24x7_teamname}})
+        plans.append({'name': private_workhours_planname, 'type': 'private-workhours', 'extra_opts': {"team": private_workhours_teamname}})
 
         # lookup supporting srt
         space_to_srt_mapping = config['sync_script']['space_to_srt_team']
-        if sane_team in scrumteams:
-            space = scrumteams[sane_team]['space']
-            srt = immutable_prefix + space_to_srt_mapping[space]
-            plans.append({'name': team + srt_suffix, 'type': 'scrumteam', 'extra_opts': {
+        if bol_teamname in scrumteams:
+            space = scrumteams[bol_teamname]['space']
+            srt = space_to_srt_mapping[space] + immutable_suffix
+            plans.append({'name': with_srt_planname, 'type': 'scrumteam', 'extra_opts': {
                 'escalation_team': srt,
-                'standby_team': immutable_prefix + middleware_team,
-                'standby_escalation_team': immutable_prefix + mod_team,
+                'standby_team': middleware_team + immutable_suffix,
+                'standby_escalation_team': mod_team + immutable_suffix,
+                'team': with_srt_teamname,
             }})
         else:
-            logger.warn("Skipping srt supported plan Creation. Couldn't find team %s in scrumteam hash", sane_team)
+            logger.warn("Skipping srt supported plan Creation. Couldn't find team %s in scrumteam hash", bol_teamname)
 
-    elif sane_team in platform_teams:
-        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
-    elif sane_team in standby_teams:
-        plans.append({'name': team + mod_suffix, 'type': 'standby', 'extra_opts': {
-            'escalation_team': immutable_prefix + mod_team,
+    elif bol_teamname in platform_teams:
+        plans.append({'name': private_24x7_planname, 'type': 'private', 'extra_opts': {"team": private_24x7_teamname}})
+    elif bol_teamname in standby_teams:
+        plans.append({'name': srt_with_mod_planname, 'type': 'standby', 'extra_opts': {
+            'escalation_team': mod_team + immutable_suffix,
+            'team': srt_with_mod_teamname,
         }})
-        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
-    elif sane_team in standby_escalation_teams:
-        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
+        plans.append({'name': private_24x7_planname, 'type': 'private', 'extra_opts': {"team": private_24x7_teamname}})
+    elif bol_teamname in standby_escalation_teams:
+        plans.append({'name': private_24x7_planname, 'type': 'private', 'extra_opts': {"team": private_24x7_teamname}})
     else:
-        plans.append({'name': team + private_suffix, 'type': 'private', 'extra_opts': {}})
+        plans.append({'name': private_24x7_planname, 'type': 'private', 'extra_opts': {"team": private_24x7_teamname}})
 
     return plans
 
