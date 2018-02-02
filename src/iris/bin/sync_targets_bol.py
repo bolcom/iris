@@ -43,7 +43,7 @@ mod_team = 'mod-standby'
 
 # plan defaults
 default_template = "default"
-default_wait = 1600
+default_wait = 1800
 default_repeat = 0  # $repeat * $wait = escal time
 default_escalation_repeat = 1
 default_escalation_wait = 900
