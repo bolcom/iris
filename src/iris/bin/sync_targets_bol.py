@@ -1,5 +1,8 @@
-# Copyright (c) LinkedIn Corporation. All rights reserved. Licensed under the BSD-2 Clause license.
-# See LICENSE in the project root for license information.
+# NOTE:
+# This code has tests.
+# Please use to test changes.
+# Inspect .ci/* to setup the tests and then run:
+# make e2e_bol
 
 import datetime
 from falcon import HTTPBadRequest, HTTPForbidden, HTTPUnauthorized, HTTPNotFound
@@ -25,6 +28,8 @@ from iris import metrics
 
 
 logging.getLogger('requests').setLevel(logging.WARNING)
+
+NOOP = False
 
 # used to detect scrumteams vs itops teams
 scrumteam_prefix = 'team'
@@ -895,42 +900,25 @@ def update_user(engine, username, iris_users, oncall_users, modes):
         return
 
 
-def get_teams_default_plans(config, team):
+def get_teams_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
+    plans = []
+
     sane_name = team.replace(immutable_suffix, "")
     bol_teamname = sane_name.split('-')[0]
-
-    platform_teams = config['sync_script']['platform_teams']
-    standby_teams = config['sync_script']['standby_teams']
-    standby_escalation_teams = config['sync_script']['standby_escalation_teams']
-    teamsfile = config['sync_script']['scrumteams_file']
-
-    scrumteams = {}
-    with open(teamsfile, 'r') as stream:
-        try:
-            scrumteams = yaml.load(stream)
-        except yaml.YAMLError as err:
-            logger.error(err)
-
-    plans = []
 
     private_24x7_planname = bol_teamname + '-24x7' + private_suffix + immutable_suffix
     private_24x7_teamname = bol_teamname + '-24x7' + immutable_suffix
     private_workhours_planname = bol_teamname + '-workhours' + private_suffix + immutable_suffix
     private_workhours_teamname = bol_teamname + '-workhours' + immutable_suffix
-    with_srt_planname = bol_teamname + '-24x7' + srt_suffix + immutable_suffix
-    with_srt_teamname = bol_teamname + '-workhours' + immutable_suffix
-    srt_with_mod_planname = bol_teamname + '-24x7' + mod_suffix + immutable_suffix
-    srt_with_mod_teamname = bol_teamname + '-workhours' + immutable_suffix
+
     if team.startswith(scrumteam_prefix):
-        # Scrumteams:
-        # - teamXX-24x7-private-builtin
-        # - teamXX-workhours-private-builtin
-        # - teamXX-24x7-withsrt-builtin
+        with_srt_planname = bol_teamname + '-24x7' + srt_suffix + immutable_suffix
+        with_srt_teamname = bol_teamname + '-workhours' + immutable_suffix
+
         plans.append({'name': private_24x7_planname, 'type': 'private-24x7', 'extra_opts': {"team": private_24x7_teamname}})
         plans.append({'name': private_workhours_planname, 'type': 'private-workhours', 'extra_opts': {"team": private_workhours_teamname}})
 
         # lookup supporting srt
-        space_to_srt_mapping = config['sync_script']['space_to_srt_team']
         if bol_teamname in scrumteams:
             space = scrumteams[bol_teamname]['space']
             srt = space_to_srt_mapping[space] + immutable_suffix
@@ -945,7 +933,11 @@ def get_teams_default_plans(config, team):
 
     elif bol_teamname in platform_teams:
         plans.append({'name': private_24x7_planname, 'type': 'private', 'extra_opts': {"team": private_24x7_teamname}})
+        plans.append({'name': private_workhours_planname, 'type': 'private-workhours', 'extra_opts': {"team": private_workhours_teamname}})
     elif bol_teamname in standby_teams:
+        srt_with_mod_planname = bol_teamname + '-24x7' + mod_suffix + immutable_suffix
+        srt_with_mod_teamname = bol_teamname + '-workhours' + immutable_suffix
+
         plans.append({'name': srt_with_mod_planname, 'type': 'standby', 'extra_opts': {
             'escalation_team': mod_team + immutable_suffix,
             'team': srt_with_mod_teamname,
@@ -954,7 +946,7 @@ def get_teams_default_plans(config, team):
     elif bol_teamname in standby_escalation_teams:
         plans.append({'name': private_24x7_planname, 'type': 'private', 'extra_opts': {"team": private_24x7_teamname}})
     else:
-        plans.append({'name': private_24x7_planname, 'type': 'private', 'extra_opts': {"team": private_24x7_teamname}})
+        logger.warn("Could not determine team type by name for: %s (%s)", bol_teamname, team)
 
     return plans
 
@@ -1016,33 +1008,56 @@ def sync_from_oncall(config, engine, purge_old_users=True):
     teams_to_update = oncall_team_names & iris_team_names
     teams_to_deactivate = iris_team_names - oncall_team_names
 
-    logger.info('Teams to insert (%d)', len(teams_to_insert))
+    ### Report
+    logger.info("Teams (target) to insert: %s", list(teams_to_insert))
+    logger.info("Teams (target) to check for updating: %s", len(teams_to_update))
+    logger.info("Teams (target) to purge: %s", list(teams_to_deactivate))
+    logger.info('Users to mark inactive: %s', list(users_to_mark_inactive))
+
+    if NOOP:
+        logger.info("No Op mode enabled. No changes made.")
+        return
+
+    # we need some context to understand which plans are created for which team
+    platform_teams = config['sync_script']['platform_teams']
+    standby_teams = config['sync_script']['standby_teams']
+    standby_escalation_teams = config['sync_script']['standby_escalation_teams']
+    teamsfile = config['sync_script']['scrumteams_file']
+    space_to_srt_mapping = config['sync_script']['space_to_srt_team']
+
+    scrumteams = {}
+    with open(teamsfile, 'r') as stream:
+        try:
+            scrumteams = yaml.load(stream)
+        except yaml.YAMLError as err:
+            logger.error(err)
+
+
+    # Insert teams as targets
     for team in teams_to_insert:
         insert_team(engine, team, target_types)
-
-    # provision default plans
-    logger.info('Plans to insert (%d)', len(teams_to_insert))
-    for team in teams_to_insert:
-        for plan in get_teams_default_plans(config, team):
+        # provision default plans
+        for plan in get_teams_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
             create_plan(engine, team, plan['name'], plan['type'], plan['extra_opts'])
 
-    logger.info('Plans to check (%d)', len(teams_to_insert))
+
+    # Update teams and plans
     for team in teams_to_update:
-        for plan in get_teams_default_plans(config, team):
+        for plan in get_teams_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
             if plan['type'] == 'scrumteam':
                 plan_dict = get_plan(engine, plan['name'])
                 if not plan_dict or not valid_scrumteam_plan(engine, plan_dict, team, plan['extra_opts']):
                     create_plan(engine, team, plan['name'], plan['type'], plan['extra_opts'])
 
-    # mark users/teams/plans inactive
+
+    # Mark users/teams/plans inactive
     if purge_old_users:
-        logger.info('Users to mark inactive (%d)', len(users_to_mark_inactive))
         for username in users_to_mark_inactive:
             prune_target(engine, username, 'user')
         for team in teams_to_deactivate:
             prune_target(engine, team, 'team')
 
-            for plan in get_teams_default_plans(config, team):
+            for plan in get_teams_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
                 plan_id = get_plan_id(engine, plan['name'])
                 if plan_id:
                     deactivate_plan(engine, plan_id)
@@ -1052,6 +1067,12 @@ def sync_from_oncall(config, engine, purge_old_users=True):
 
 
 def main():
+    global NOOP
+    if len(sys.argv) == 3 and sys.argv[2] == '--noop':
+        NOOP = True
+    if len(sys.argv) > 3 or len(sys.argv) < 1:
+        sys.exit('USAGE: %s [--noop]' % sys.argv[0])
+
     config = load_config()
     metrics.init(config, 'iris-sync-targets', stats_reset)
 
