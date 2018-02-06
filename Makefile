@@ -22,6 +22,9 @@ docs:
 e2e:
 	py.test -rxs -vv ./test/e2etest.py
 
+e2e_bol:
+	py.test -rxs -vv ./test/e2etest_sync_targets_bol.py
+
 unit:
 	py.test -vv test
 
