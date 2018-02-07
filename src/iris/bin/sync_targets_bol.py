@@ -22,6 +22,7 @@ from phonenumbers.phonenumberutil import NumberParseException
 
 import ujson
 import yaml
+import sys
 
 from iris.api import load_config
 from iris import metrics
@@ -55,20 +56,21 @@ default_escalation_wait = 900
 default_priority = "high"
 default_standby_escalation_priority = "urgent"
 
-ignore_plan_fields = ['created',
-                      'aggregation_reset',
-                      'aggregation_window',
-                      'id',
-                      'name',
-                      'plan_active.name',
-                      'plan_id',
-                      'threshold_count',
-                      'threshold_window',
-                      'tracking_key',
-                      'tracking_template',
-                      'tracking_type',
-                      'user_id',
-                     ]
+ignore_plan_fields = [
+    'created',
+     'aggregation_reset',
+     'aggregation_window',
+     'id',
+     'name',
+     'plan_active.name',
+     'plan_id',
+     'threshold_count',
+     'threshold_window',
+     'tracking_key',
+     'tracking_template',
+     'tracking_type',
+     'user_id',
+]
 
 stats_reset = {
     'sql_errors': 0,
@@ -785,9 +787,10 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
 
             if not allowed_roles:
                 session.close()
-                logger.warn("No result for: %s", get_allowed_roles_query)
-                logger.warn("With input: %s", step)
-                logger.warn("extra_opts: %s", extra_opts)
+                logger.error("For team %s", team)
+                logger.error("No result for: %s", get_allowed_roles_query)
+                logger.error("With input: %s", step)
+                logger.error("extra_opts: %s", extra_opts)
                 raise HTTPBadRequest(
                     'Invalid plan',
                     'Target %s not found for step %s' % (step['target'], index))
@@ -1036,12 +1039,13 @@ def sync_from_oncall(config, engine, purge_old_users=True):
     # Insert teams as targets
     for team in teams_to_insert:
         insert_team(engine, team, target_types)
-        # provision default plans
+    ## Provision default plans for our new targets
+    for team in teams_to_insert:
         for plan in get_teams_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
             create_plan(engine, team, plan['name'], plan['type'], plan['extra_opts'])
 
 
-    # Update teams and plans
+    # Update plans
     for team in teams_to_update:
         for plan in get_teams_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
             if plan['type'] == 'scrumteam':
