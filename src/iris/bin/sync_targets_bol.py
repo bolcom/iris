@@ -23,6 +23,7 @@ from phonenumbers.phonenumberutil import NumberParseException
 import ujson
 import yaml
 import sys
+import copy
 
 from iris.api import load_config
 from iris import metrics
@@ -44,8 +45,10 @@ mod_suffix = '-withmod'
 private_suffix = '-private'
 
 # used to point to teams that are used by plans
-middleware_team = 'middleware-standby'
-mod_team = 'mod-standby'
+middleware_team = 'middleware'
+mod_team = 'mod'
+
+timeperiods = ['workhours', 'standby', '24x7', 'businesshours']
 
 # plan defaults
 default_template = "default"
@@ -56,20 +59,130 @@ default_escalation_wait = 900
 default_priority = "high"
 default_standby_escalation_priority = "urgent"
 
+default_plan_template = {
+    'creator': 'dummy',
+    'name': None,
+    'created': None,
+    'description': None,
+    'step_count': None,
+    'threshold_window': 900,
+    'threshold_count': 10,
+    'aggregation_window': 300,
+    'aggregation_reset': 300,
+    'tracking_key': None,
+    'tracking_type': None,
+    'tracking_template': None
+}
+
+default_scrumteam_plan_steps = [
+    [
+        {
+            "priority": default_priority,
+            "repeat": default_repeat,
+            "role": "oncall-primary-exclude-holidays",
+            "target": None,
+            "template": default_template,
+            "wait": default_wait,
+        },
+        {
+            "priority": default_priority,
+            "repeat": default_repeat,
+            "role": "oncall-primary",
+            "target": None,
+            "template": default_template,
+            "wait": default_wait,
+        }
+    ],
+    [
+        {
+            "priority": default_priority,
+            "repeat": default_escalation_repeat,
+            "role": "oncall-primary-exclude-holidays",
+            "target": None,
+            "template": default_template,
+            "wait": default_escalation_wait,
+        },
+        {
+            "priority": default_standby_escalation_priority,
+            "repeat": default_escalation_repeat,
+            "role": "oncall-primary",
+            "target": None,
+            "template": default_template,
+            "wait": default_escalation_wait,
+        }
+    ],
+    [
+        {
+            "priority": default_standby_escalation_priority,
+            "repeat": default_escalation_repeat,
+            "role": "oncall-primary",
+            "target": None,
+            "template": default_template,
+            "wait": default_escalation_wait,
+        }
+    ]
+]
+
+default_standby_plan_steps = [
+    [
+        {
+            "priority": default_priority,
+            "repeat": default_repeat,
+            "role": "oncall-primary",
+            "target": None,
+            "template": default_template,
+            "wait": default_wait,
+        }
+    ],
+    [
+        {
+            "priority": default_standby_escalation_priority,
+            "repeat": default_escalation_repeat,
+            "role": "oncall-primary",
+            "target": None,
+            "template": default_template,
+            "wait": default_escalation_wait,
+        }
+    ],
+    [
+        {
+            "priority": default_standby_escalation_priority,
+            "repeat": default_escalation_repeat,
+            "role": "oncall-primary",
+            "target": None,
+            "template": default_template,
+            "wait": default_escalation_wait,
+        }
+    ]
+]
+default_private_plan_steps = [
+    [
+        {
+            "priority": default_priority,
+            "repeat": default_repeat,
+            "role": "oncall-primary",
+            "target": None,
+            "template": default_template,
+            "wait": default_wait,
+        }
+    ]
+]
+
 ignore_plan_fields = [
     'created',
-     'aggregation_reset',
-     'aggregation_window',
-     'id',
-     'name',
-     'plan_active.name',
-     'plan_id',
-     'threshold_count',
-     'threshold_window',
-     'tracking_key',
-     'tracking_template',
-     'tracking_type',
-     'user_id',
+    'creator',
+    'aggregation_reset',
+    'aggregation_window',
+    'id',
+    'name',
+    'plan_active.name',
+    'plan_id',
+    'threshold_count',
+    'threshold_window',
+    'tracking_key',
+    'tracking_template',
+    'tracking_type',
+    'user_id',
 ]
 
 stats_reset = {
@@ -209,6 +322,17 @@ def fetch_teams_from_oncall(oncall_base_url):
         return []
 
 
+def fetch_users_from_oncall(oncall_base_url):
+    oncall_user_endpoint = oncall_base_url + '/api/v0/users?fields=name&fields=contacts&fields=active'
+    try:
+        return {user['name']: fix_user_contacts(user['contacts'])
+                for user in requests.get(oncall_user_endpoint).json()
+                if user['active']}
+    except (ValueError, KeyError, requests.exceptions.RequestException):
+        logger.exception('Failed hitting oncall endpoint to fetch list of users')
+        return {}
+
+
 def fix_user_contacts(contacts):
     sms = contacts.get('sms')
     if sms:
@@ -219,17 +343,6 @@ def fix_user_contacts(contacts):
         contacts['call'] = normalize_phone_number(call)
 
     return contacts
-
-
-def fetch_users_from_oncall(oncall_base_url):
-    oncall_user_endpoint = oncall_base_url + '/api/v0/users?fields=name&fields=contacts&fields=active'
-    try:
-        return {user['name']: fix_user_contacts(user['contacts'])
-                for user in requests.get(oncall_user_endpoint).json()
-                if user['active']}
-    except (ValueError, KeyError, requests.exceptions.RequestException):
-        logger.exception('Failed hitting oncall endpoint to fetch list of users')
-        return {}
 
 
 def ts_to_sql_datetime(ts):
@@ -345,6 +458,8 @@ def get_plan(engine, plan_name):
     return plan
 
 
+# Used for comparison to intended plan nofitications
+# filters ignored fields
 def get_plan_notification(engine, plan_id):
     plan_notification_query = '''SELECT * FROM `plan_notification` WHERE (`plan_id`=%s)'''
 
@@ -361,7 +476,56 @@ def get_plan_notification(engine, plan_id):
     if not plan_notification:
         return False
 
-    return plan_notification
+    ignore_notification_fields = ['id', 'plan_id', 'dynamic_index']
+    for idx, notification in enumerate(plan_notification):
+        # filter fields we don't care about for comparison
+        for field in ignore_notification_fields:
+            plan_notification[idx].pop(field)
+        # transform fields that create_plan already handles
+        target_id = plan_notification[idx].pop('target_id')
+        plan_notification[idx]['target'] = target_id
+        priority_id = plan_notification[idx].pop('priority_id')
+        plan_notification[idx]['priority'] = get_priority_id(engine, priority_id)
+        role_id = plan_notification[idx].pop('role_id')
+        plan_notification[idx]['role'] = get_target_role_name(engine, role_id)
+
+    # get_plan_notification gives us a simple list of notifications
+    # we need one with sublists, one per step level for comparison
+    # but with step numbers removed (nested structure implies steplevel)
+    plan_notification_clean = []
+    unique_steps = set()
+    for steps in plan_notification:
+        unique_steps.add(steps['step'])
+    for steplevel in unique_steps:
+        current_steps = []
+        current_steps = [steps for steps in plan_notification if steps['step'] == steplevel]
+        current_steps_clean = copy.deepcopy(current_steps)
+        for step in current_steps_clean:
+            del(step['step'])
+        plan_notification_clean.append(current_steps_clean)
+
+    return plan_notification_clean
+
+
+def get_priority_id(engine, priority_id):
+    priority_query = '''SELECT * FROM `priority` WHERE `id`="%s"'''
+
+    query = priority_query % priority_id
+
+    connection = engine.raw_connection()
+
+    cursor = connection.cursor(engine.dialect.dbapi.cursors.DictCursor)
+    cursor.execute(query)
+    priority = cursor.fetchone()
+
+    connection.close()
+
+    if not priority:
+        return False
+
+    priority_name = priority['name']
+
+    return priority_name
 
 
 def get_priority(engine, priority_name):
@@ -383,6 +547,48 @@ def get_priority(engine, priority_name):
     priority_id = priority['id']
 
     return priority_id
+
+
+def get_priority(engine, priority_name):
+    priority_query = '''SELECT * FROM `priority` WHERE `name`="%s"'''
+
+    query = priority_query % priority_name
+
+    connection = engine.raw_connection()
+
+    cursor = connection.cursor(engine.dialect.dbapi.cursors.DictCursor)
+    cursor.execute(query)
+    priority = cursor.fetchone()
+
+    connection.close()
+
+    if not priority:
+        return False
+
+    priority_id = priority['id']
+
+    return priority_id
+
+
+def get_target_role_name(engine, role_id):
+    role_query = '''SELECT * FROM `target_role` WHERE `id`="%s"'''
+
+    query = role_query % role_id
+
+    connection = engine.raw_connection()
+
+    cursor = connection.cursor(engine.dialect.dbapi.cursors.DictCursor)
+    cursor.execute(query)
+    role = cursor.fetchone()
+
+    connection.close()
+
+    if not role:
+        return False
+
+    role_name = role['name']
+
+    return role_name
 
 
 def get_target_role(engine, role_name):
@@ -428,106 +634,65 @@ def get_target(engine, target):
     return target_id
 
 
-def valid_scrumteam_plan(engine, plan, team, plan_opts):
-    # TODO: validate simple plans
-    # compare plans
-
-    sane_plan = plan.copy()
+def valid_plan(engine, plan, team, default_plan, plan_type):
+    is_plan = copy.deepcopy(plan)
+    should_plan = copy.deepcopy(default_plan_template)
     for field in ignore_plan_fields:
-        sane_plan.pop(field)
+        try:
+            should_plan.pop(field)
+        except KeyError:
+            pass
+        try:
+            is_plan.pop(field)
+        except KeyError:
+            pass
 
-    valid_plan = {
-        u'description': u'Escalation and after hours support by SRT, EOD and MOD',
-        u'step_count': 1,
-        u'team_id': None,
-    }
+    if plan_type == 'withsrt-24x7':
+        should_plan['step_count'] = 3
+        should_plan['description'] = 'Escalation and after hours support by SRT, EOD and MOD'
+        should_plan['team_id'] = None
 
-    if not cmp(valid_plan, sane_plan) == 0:
-        logger.info("Plan %s needs fixing", plan['plan_active.name'])
-        return False
+        if not cmp(should_plan, is_plan) == 0:
+            logger.info("Plan %s needs fixing", plan['plan_active.name'])
+            logger.info("Got: %s", is_plan)
+            logger.info("Should be: %s", should_plan)
+            return False
 
-    # compare plan_notifications
-    plan_notification = get_plan_notification(engine, plan['id'])
-    if not plan_notification:
-        return False
+        # compare plan_notifications
+        is_notification = get_plan_notification(engine, plan['id'])
+        if not is_notification:
+            logger.info("No plan notifications found for: %s", plan['id'])
+            return False
 
-    ignore_plan_notification_fields = ['id', 'plan_id']
+        # plan notification expected values
+        team_target_id = get_target(engine, default_plan['all_steps'][0][0]['target'])
+        eod_target_id = get_target(engine, default_plan['all_steps'][0][1]['target'])
+        srt_target_id = get_target(engine, default_plan['all_steps'][1][0]['target'])
+        mod_target_id = get_target(engine, default_plan['all_steps'][2][0]['target'])
 
-    sane_plan_notification = plan_notification[:]
-    for idx, notification in enumerate(sane_plan_notification):
-        for field in ignore_plan_notification_fields:
-            sane_plan_notification[idx].pop(field)
+        should_notification = copy.deepcopy(default_scrumteam_plan_steps)
+        should_notification[0][0]['target'] = team_target_id
+        should_notification[0][1]['target'] = eod_target_id
+        should_notification[1][0]['target'] = srt_target_id
+        should_notification[1][1]['target'] = eod_target_id
+        should_notification[2][0]['target'] = mod_target_id
 
-    prio_high_id = get_priority(engine, "high")
-    prio_urgent_id = get_priority(engine, "urgent")
-    oncall_primary_role_id = get_target_role(engine, "oncall-primary")
-    oncall_primary_exclude_holidays_role_id = get_target_role(engine, "oncall-primary-exclude-holidays")
-
-    team_target_id = get_target(engine, plan_opts['team'])
-    eod_target_id = get_target(engine, plan_opts['standby_team'])
-    mod_target_id = get_target(engine, plan_opts['standby_escalation_team'])
-    srt_target_id = get_target(engine, plan_opts['escalation_team'])
-
-    template = 'default'
-    valid_plan_notification = [
-            {
-                u'dynamic_index': None,
-                u'priority_id': prio_high_id,
-                u'repeat': default_repeat,
-                u'role_id': oncall_primary_exclude_holidays_role_id,
-                u'step': 1,
-                u'target_id': team_target_id,
-                u'template': template,
-                u'wait': default_wait,
-            },
-            {   u'dynamic_index': None,
-                u'priority_id': prio_high_id,
-                u'repeat': default_repeat,
-                u'role_id': oncall_primary_role_id,
-                u'step': 1,
-                u'target_id': eod_target_id,
-                u'template': template,
-                u'wait': default_wait,
-            },
-            {   u'dynamic_index': None,
-                u'priority_id': prio_high_id,
-                u'repeat': default_escalation_repeat,
-                u'role_id': oncall_primary_exclude_holidays_role_id,
-                u'step': 2,
-                u'target_id': srt_target_id,
-                u'template': template,
-                u'wait': default_escalation_wait,
-            },
-            {   u'dynamic_index': None,
-                u'priority_id': prio_urgent_id,
-                u'repeat': default_escalation_repeat,
-                u'role_id': oncall_primary_role_id,
-                u'step': 2,
-                u'target_id': eod_target_id,
-                u'template': template,
-                u'wait': default_escalation_wait,
-            },
-            {   u'dynamic_index': None,
-                u'priority_id': prio_urgent_id,
-                u'repeat': default_escalation_repeat,
-                u'role_id': oncall_primary_role_id,
-                u'step': 3,
-                u'target_id': mod_target_id,
-                u'template': template,
-                u'wait': default_escalation_wait,
-            }
-        ]
-
-    if not cmp(valid_plan_notification, sane_plan_notification) == 0:
-        logger.info("Plan notification %s needs fixing", plan['plan_active.name'])
-        for idx, _ in enumerate(valid_plan_notification):
-            logger.info("Step %s", idx)
-            d = DictDiffer(valid_plan_notification[idx], sane_plan_notification[idx])
-            logger.info("Added: %s", d.added())
-            logger.info("Removed: %s", d.removed())
-            logger.info("Changed: %s", d.changed())
-        return False
-
+        for steplevel, list_of_steps in enumerate(should_notification):
+            # we don't care about ordering, so we reverse the check as well
+            if list_of_steps != is_notification[steplevel] and list_of_steps[::-1] != is_notification[steplevel]:
+                logger.info("not the same")
+                logger.info("should: %s", list_of_steps)
+                logger.info("is: %s", is_notification[steplevel])
+                return False
+    # TODO
+    elif plan_type == 'withmod-standby':
+        pass
+    elif plan_type == 'private-workhours':
+        pass
+    elif plan_type == 'private-businesshours':
+        pass
+    elif plan_type == 'private-24x7':
+        pass
     return True
 
 
@@ -569,9 +734,47 @@ def fetch_plans(engine):
     connection.close()
 
 
+def get_default_plan_steps(team, plan_type, target_team, standby_team, escalation_team, standby_escalation_team):
+    plan_description = ""
+    step_count = 0
+    all_steps = []
+    if plan_type == 'withsrt-24x7':
+        if not standby_team:
+            logger.error("Missing standbyteam for plan %s", team)
+        if not escalation_team:
+            logger.error("Missing escalation_team for plan %s", team)
+        if not standby_escalation_team:
+            logger.error("Missing standby_escalation_team for plan %s", team)
+
+        plan_description = 'Escalation and after hours support by SRT, EOD and MOD'
+        step_count = 3
+        all_steps = copy.deepcopy(default_scrumteam_plan_steps)
+        all_steps[0][0]['target'] = target_team
+        all_steps[0][1]['target'] = standby_team
+        all_steps[1][0]['target'] = escalation_team
+        all_steps[1][1]['target'] = standby_team
+        all_steps[2][0]['target'] = standby_escalation_team
+    elif plan_type == 'withmod-standby':
+        if not escalation_team:
+            logger.error("Missing escalation_team for plan %s", team)
+        plan_description = 'Standby plan with escalation (24x7)'
+        step_count = 3
+        all_steps = copy.deepcopy(default_standby_plan_steps)
+        all_steps[0][0]['target'] = target_team
+        all_steps[1][0]['target'] = escalation_team
+        all_steps[2][0]['target'] = escalation_team
+    elif plan_type in ['private-workhours', 'private-businesshours', 'private-24x7']:
+        all_steps = copy.deepcopy(default_private_plan_steps)
+        all_steps[0][0]['target'] = target_team
+        plan_description = 'Simple plan without escalation (' + plan_type.split('-')[-1] + ')'
+        step_count = 0
+    else:
+        logger.warn("No such plan type %s for %s", plan_type, team)
+    return plan_description, step_count, all_steps
+
 # Provision a default scrum team plan
-def create_plan(engine, team, plan_name, plan_type, extra_opts):
-    logger.info("Creating default %s plan for %s", plan_type, team)
+def create_plan(engine, team, plan_name, all_steps, step_count, plan_description):
+    logger.info("Creating default plan %s for %s", plan_name, team)
     insert_plan_query = '''REPLACE INTO `plan` (
         `user_id`, `name`, `created`, `description`, `step_count`,
         `threshold_window`, `threshold_count`, `aggregation_window`,
@@ -593,160 +796,6 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
         :tracking_template
     )'''
 
-    now = datetime.datetime.utcnow()
-
-    plan_description = ""
-    step_count = 0
-    all_steps = []
-    if plan_type == 'scrumteam':
-        plan_description = 'Escalation and after hours support by SRT, EOD and MOD'
-        step_count = 1
-        all_steps = [
-            [
-                {
-                    "priority": default_priority,
-                    "repeat": default_repeat,
-                    "role": "oncall-primary-exclude-holidays",
-                    "target": extra_opts['team'],
-                    "template": default_template,
-                    "wait": default_wait,
-                },
-                {
-                    "priority": default_priority,
-                    "repeat": default_repeat,
-                    "role": "oncall-primary",
-                    "target": extra_opts['standby_team'],
-                    "template": default_template,
-                    "wait": default_wait,
-                }
-            ],
-            [
-                {
-                    "priority": default_priority,
-                    "repeat": default_escalation_repeat,
-                    "role": "oncall-primary-exclude-holidays",
-                    "target": extra_opts['escalation_team'],
-                    "template": default_template,
-                    "wait": default_escalation_wait,
-                },
-                {
-                    "priority": default_standby_escalation_priority,
-                    "repeat": default_escalation_repeat,
-                    "role": "oncall-primary",
-                    "target": extra_opts['standby_team'],
-                    "template": default_template,
-                    "wait": default_escalation_wait,
-                }
-            ],
-            [
-                {
-                    "priority": default_standby_escalation_priority,
-                    "repeat": default_escalation_repeat,
-                    "role": "oncall-primary",
-                    "target": extra_opts['standby_escalation_team'],
-                    "template": default_template,
-                    "wait": default_escalation_wait,
-                }
-            ]
-        ]
-    elif plan_type == 'standby':
-        plan_description = 'Standby plan with escalation'
-        step_count = 0
-        all_steps = [
-            [
-                {
-                    "priority": default_priority,
-                    "repeat": default_repeat,
-                    "role": "oncall-primary",
-                    "target": extra_opts['team'],
-                    "template": default_template,
-                    "wait": default_wait,
-                }
-            ],
-            [
-                {
-                    "priority": default_standby_escalation_priority,
-                    "repeat": default_escalation_repeat,
-                    "role": "oncall-primary",
-                    "target": team,
-                    "template": default_template,
-                    "wait": default_escalation_wait,
-                }
-            ],
-            [
-                {
-                    "priority": default_standby_escalation_priority,
-                    "repeat": default_escalation_repeat,
-                    "role": "oncall-primary",
-                    "target": extra_opts['escalation_team'],
-                    "template": default_template,
-                    "wait": default_escalation_wait,
-                }
-            ]
-        ]
-    elif plan_type == 'private':
-        plan_description = 'Simple plan without escalation'
-        step_count = 0
-        all_steps = [
-            [
-                {
-                    "priority": default_priority,
-                    "repeat": default_repeat,
-                    "role": "oncall-primary",
-                    "target": extra_opts['team'],
-                    "template": default_template,
-                    "wait": default_wait,
-                }
-            ]
-        ]
-    elif plan_type == 'private-workhours':
-        plan_description = 'Simple plan without escalation'
-        step_count = 0
-        all_steps = [
-            [
-                {
-                    "priority": default_priority,
-                    "repeat": default_repeat,
-                    "role": "oncall-primary",
-                    "target": extra_opts['team'],
-                    "template": default_template,
-                    "wait": default_wait,
-                }
-            ]
-        ]
-    elif plan_type == 'private-24x7':
-        plan_description = 'Simple plan without escalation'
-        step_count = 0
-        all_steps = [
-            [
-                {
-                    "priority": default_priority,
-                    "repeat": default_repeat,
-                    "role": "oncall-primary",
-                    "target": extra_opts['team'],
-                    "template": default_template,
-                    "wait": default_wait,
-                }
-            ]
-        ]
-    else:
-        logger.info("Unknown plan type '%s' requested", plan_type)
-
-    plan_dict = {
-        'creator': 'dummy',
-        'name': plan_name,
-        'created': now,
-        'description': plan_description,
-        'step_count': step_count,
-        'threshold_window': 900,
-        'threshold_count': 10,
-        'aggregation_window': 300,
-        'aggregation_reset': 300,
-        'tracking_key': None,
-        'tracking_type': None,
-        'tracking_template': None
-    }
-
     insert_plan_step_query = '''REPLACE INTO `plan_notification` (
         `plan_id`, `step`, `priority_id`, `target_id`, `template`, `role_id`, `repeat`, `wait`
     ) VALUES (
@@ -767,6 +816,12 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
                                 JOIN `target_type` ON `target_type`.`id` = `target_role`.`type_id`
                                 JOIN `target` ON `target`.`type_id` = `target_type`.`id`
                                 WHERE `target`.`name` = :target'''
+
+    plan_dict = copy.deepcopy(default_plan_template)
+    plan_dict['name'] = plan_name
+    plan_dict['created'] = datetime.datetime.utcnow()
+    plan_dict['description'] = plan_description
+    plan_dict['step_count'] = step_count
 
     Session = sessionmaker(bind=engine)
     session = Session()
@@ -790,7 +845,6 @@ def create_plan(engine, team, plan_name, plan_type, extra_opts):
                 logger.error("For team %s", team)
                 logger.error("No result for: %s", get_allowed_roles_query)
                 logger.error("With input: %s", step)
-                logger.error("extra_opts: %s", extra_opts)
                 raise HTTPBadRequest(
                     'Invalid plan',
                     'Target %s not found for step %s' % (step['target'], index))
@@ -903,7 +957,8 @@ def update_user(engine, username, iris_users, oncall_users, modes):
         return
 
 
-def get_teams_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
+# Return default plans for teams we manage
+def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
     plans = []
 
     sane_name = team.replace(immutable_suffix, "")
@@ -913,48 +968,118 @@ def get_teams_default_plans(space_to_srt_mapping, team, platform_teams, standby_
     private_24x7_teamname = bol_teamname + '-24x7' + immutable_suffix
     private_workhours_planname = bol_teamname + '-workhours' + private_suffix + immutable_suffix
     private_workhours_teamname = bol_teamname + '-workhours' + immutable_suffix
+    private_businesshours_planname = bol_teamname + '-businesshours' + private_suffix + immutable_suffix
+    private_businesshours_teamname = bol_teamname + '-businesshours' + immutable_suffix
 
-    if team.startswith(scrumteam_prefix):
-        with_srt_planname = bol_teamname + '-24x7' + srt_suffix + immutable_suffix
-        with_srt_teamname = bol_teamname + '-workhours' + immutable_suffix
+    if bol_teamname in platform_teams:
+        # private 24x7 and private workhours are default
+        pass
+    elif bol_teamname in standby_teams:
+        # with mod 24x7
+        withmod_planname = bol_teamname + '-24x7' + mod_suffix + immutable_suffix
+        withmod_teamname = bol_teamname + '-workhours' + immutable_suffix
+        escalation_team = mod_team + '-24x7' + immutable_suffix
 
-        plans.append({'name': private_24x7_planname, 'type': 'private-24x7', 'extra_opts': {"team": private_24x7_teamname}})
-        plans.append({'name': private_workhours_planname, 'type': 'private-workhours', 'extra_opts': {"team": private_workhours_teamname}})
+        plan_description, step_count, all_steps = get_default_plan_steps(team, 'withmod-standby', withmod_teamname, None, escalation_team, None)
+        plans.append({
+            'name': withmod_planname,
+            'plan_description': plan_description,
+            'step_count': step_count,
+            'all_steps': all_steps,
+            'type': 'withmod-standby',
+        })
 
-        # lookup supporting srt
+        # with mod businesshours
+        withmod_businesshours_planname = bol_teamname + '-businesshours' + mod_suffix + immutable_suffix
+        withmod_businesshours_teamname = bol_teamname + '-workhours' + immutable_suffix
+        escalation_team = mod_team + '-businesshours' + immutable_suffix
+        plan_description, step_count, all_steps = get_default_plan_steps(team, 'withmod-standby', withmod_businesshours_teamname, None, escalation_team, None)
+        plans.append({
+            'name': withmod_businesshours_planname,
+            'plan_description': plan_description,
+            'step_count': step_count,
+            'all_steps': all_steps,
+            'type': 'withmod-businesshours',
+        })
+    elif bol_teamname in standby_escalation_teams:
+        # private 24x7 is default
+        pass
+    elif team.startswith(scrumteam_prefix):
         if bol_teamname in scrumteams:
+            # lookup supporting srt
             space = scrumteams[bol_teamname]['space']
             srt = space_to_srt_mapping[space] + immutable_suffix
-            plans.append({'name': with_srt_planname, 'type': 'scrumteam', 'extra_opts': {
-                'escalation_team': srt,
-                'standby_team': middleware_team + immutable_suffix,
-                'standby_escalation_team': mod_team + immutable_suffix,
-                'team': with_srt_teamname,
-            }})
-        else:
-            logger.warn("Skipping srt supported plan Creation. Couldn't find team %s in scrumteam hash", bol_teamname)
 
-    elif bol_teamname in platform_teams:
-        plans.append({'name': private_24x7_planname, 'type': 'private', 'extra_opts': {"team": private_24x7_teamname}})
-        plans.append({'name': private_workhours_planname, 'type': 'private-workhours', 'extra_opts': {"team": private_workhours_teamname}})
-    elif bol_teamname in standby_teams:
-        srt_with_mod_planname = bol_teamname + '-24x7' + mod_suffix + immutable_suffix
-        srt_with_mod_teamname = bol_teamname + '-workhours' + immutable_suffix
+            # with srt and eod, with escalation to mod 24x7
+            withsrt_planname = bol_teamname + '-24x7' + srt_suffix + immutable_suffix
+            withsrt_teamname = bol_teamname + '-workhours' + immutable_suffix
+            escalation_team = srt
+            standby_team = middleware_team + '-standby' + immutable_suffix
+            standby_escalation_team = mod_team + '-standby' + immutable_suffix
 
-        plans.append({'name': srt_with_mod_planname, 'type': 'standby', 'extra_opts': {
-            'escalation_team': mod_team + immutable_suffix,
-            'team': srt_with_mod_teamname,
-        }})
-        plans.append({'name': private_24x7_planname, 'type': 'private', 'extra_opts': {"team": private_24x7_teamname}})
-    elif bol_teamname in standby_escalation_teams:
-        plans.append({'name': private_24x7_planname, 'type': 'private', 'extra_opts': {"team": private_24x7_teamname}})
-    else:
-        logger.warn("Could not determine team type by name for: %s (%s)", bol_teamname, team)
+            plan_description, step_count, all_steps = get_default_plan_steps(team, 'withsrt-24x7', withsrt_teamname, standby_team, escalation_team, standby_escalation_team)
+            plans.append({
+                'name': withsrt_planname,
+                'plan_description': plan_description,
+                'step_count': step_count,
+                'all_steps': all_steps,
+                'type': 'withsrt-24x7',
+            })
+
+            # with srt and eod, with escalation to mod businesshours
+            withsrt_businesshours_planname = bol_teamname + '-businesshours' + srt_suffix + immutable_suffix
+            withsrt_businesshours_teamname = bol_teamname + '-workhours' + immutable_suffix
+            escalation_team = srt
+            standby_team = middleware_team + '-businesshours' + immutable_suffix
+            standby_escalation_team = mod_team + '-businesshours' + immutable_suffix
+            plan_description, step_count, all_steps = get_default_plan_steps(team, 'withsrt-24x7', withsrt_businesshours_teamname, standby_team, escalation_team, standby_escalation_team)
+            plans.append({
+                'name': withsrt_businesshours_planname,
+                'plan_description': plan_description,
+                'step_count': step_count,
+                'all_steps': all_steps,
+                'type': 'withsrt-businesshours',
+            })
+
+        # private 24x7, businesshours and workhours
+        plan_description, step_count, all_steps = get_default_plan_steps(team, 'private-24x7', private_24x7_teamname, None, None, None)
+        plans.append({
+            'name': private_24x7_planname,
+            'plan_description': plan_description,
+            'step_count': step_count,
+            'all_steps': all_steps,
+            'type': 'private-24x7',
+        })
+        plan_description, step_count, all_steps = get_default_plan_steps(team, 'private-businesshours', private_businesshours_teamname, None, None, None)
+        plans.append({
+            'name': private_businesshours_planname,
+            'plan_description': plan_description,
+            'step_count': step_count,
+            'all_steps': all_steps,
+            'type': 'private-businesshours',
+        })
+        plan_description, step_count, all_steps = get_default_plan_steps(team, 'private-workhours', private_workhours_teamname, None, None, None)
+        plans.append({
+            'name': private_workhours_planname,
+            'plan_description': plan_description,
+            'step_count': step_count,
+            'all_steps': all_steps,
+            'type': 'private-workhours',
+        })
 
     return plans
 
 
 def sync_from_oncall(config, engine, purge_old_users=True):
+    # before we start, make sure we can open teams.yaml
+    scrumteams = {}
+    teamsfile = config['sync_script']['scrumteams_file']
+    with open(teamsfile, 'r') as stream:
+        try:
+            scrumteams = yaml.load(stream)
+        except yaml.YAMLError as err:
+            logger.error(err)
+
     # users and teams present in our oncall database
     oncall_base_url = config.get('oncall-api')
 
@@ -1025,33 +1150,34 @@ def sync_from_oncall(config, engine, purge_old_users=True):
     platform_teams = config['sync_script']['platform_teams']
     standby_teams = config['sync_script']['standby_teams']
     standby_escalation_teams = config['sync_script']['standby_escalation_teams']
-    teamsfile = config['sync_script']['scrumteams_file']
     space_to_srt_mapping = config['sync_script']['space_to_srt_team']
-
-    scrumteams = {}
-    with open(teamsfile, 'r') as stream:
-        try:
-            scrumteams = yaml.load(stream)
-        except yaml.YAMLError as err:
-            logger.error(err)
-
 
     # Insert teams as targets
     for team in teams_to_insert:
         insert_team(engine, team, target_types)
-    ## Provision default plans for our new targets
-    for team in teams_to_insert:
-        for plan in get_teams_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
-            create_plan(engine, team, plan['name'], plan['type'], plan['extra_opts'])
+
+    # While all oncall teams are valid targets, we need a list of actual teams
+    # in order to understand which plans need creating
+    bol_teams = []
+    for bol_team in teams_to_insert:
+        bol_team = bol_team.replace(immutable_suffix, '')
+        for timeperiod in timeperiods:
+            bol_team = bol_team.replace('-' + timeperiod, '')
+        bol_teams.append(bol_team)
+    bol_teams = set(bol_teams)
+
+    # Provision default plans for our new targets
+    for team in bol_teams:
+        for plan in get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
+            create_plan(engine, team, plan['name'], plan['all_steps'], plan['step_count'], plan['plan_description'])
 
 
     # Update plans
     for team in teams_to_update:
-        for plan in get_teams_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
-            if plan['type'] == 'scrumteam':
-                plan_dict = get_plan(engine, plan['name'])
-                if not plan_dict or not valid_scrumteam_plan(engine, plan_dict, team, plan['extra_opts']):
-                    create_plan(engine, team, plan['name'], plan['type'], plan['extra_opts'])
+        for default_plan in get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
+            actual_plan = get_plan(engine, default_plan['name'])
+            if not actual_plan or not valid_plan(engine, actual_plan, team, default_plan, default_plan['type']):
+                create_plan(engine, team, default_plan['name'], default_plan['all_steps'], default_plan['step_count'], default_plan['plan_description'])
 
 
     # Mark users/teams/plans inactive
@@ -1061,7 +1187,7 @@ def sync_from_oncall(config, engine, purge_old_users=True):
         for team in teams_to_deactivate:
             prune_target(engine, team, 'team')
 
-            for plan in get_teams_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
+            for plan in get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
                 plan_id = get_plan_id(engine, plan['name'])
                 if plan_id:
                     deactivate_plan(engine, plan_id)
