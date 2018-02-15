@@ -890,13 +890,13 @@ def create_plan(engine, team, plan_name, all_steps, step_count, plan_description
                 logger.error("With input: %s", step)
                 raise HTTPBadRequest(
                     'Invalid plan',
-                    'Target %s not found for step %s' % (step['target'], index))
+                    'Target {} not found for step {}'.format(step['target'], index))
 
             if role not in allowed_roles:
                 session.close()
                 raise HTTPBadRequest(
                     'Invalid role',
-                    'Role %s is not appropriate for target %s in step %s' % (
+                    'Role {} is not appropriate for target {} in step {}'.format(
                         step['role'], step['target'], index))
 
             try:
@@ -904,7 +904,7 @@ def create_plan(engine, team, plan_name, all_steps, step_count, plan_description
             except IntegrityError:
                 session.close()
                 raise HTTPBadRequest('Invalid plan',
-                                     'Target not found for step %s' % index)
+                                     'Target not found for step {}'.format(index))
 
     session.execute('INSERT INTO `plan_active` (`name`, `plan_id`) '
                     'VALUES (:name, :plan_id) ON DUPLICATE KEY UPDATE `plan_id`=:plan_id',
