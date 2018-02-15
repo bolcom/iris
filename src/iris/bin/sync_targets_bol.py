@@ -778,17 +778,17 @@ def fetch_plans(engine):
     connection.close()
 
 
-def get_default_plan_steps(team, plan_type, target_team, standby_team, escalation_team, standby_escalation_team):
+def get_default_plan_steps(plan_name, plan_type, target_team, standby_team, escalation_team, standby_escalation_team):
     plan_description = ""
     step_count = 1
     all_steps = []
     if plan_type == 'withsrt-24x7':
         if not standby_team:
-            logger.error("Missing standbyteam for plan %s", team)
+            logger.error("Missing standbyteam for plan %s", plan_name)
         if not escalation_team:
-            logger.error("Missing escalation_team for plan %s", team)
+            logger.error("Missing escalation_team for plan %s", plan_name)
         if not standby_escalation_team:
-            logger.error("Missing standby_escalation_team for plan %s", team)
+            logger.error("Missing standby_escalation_team for plan %s", plan_name)
 
         plan_description = 'Escalation and after hours support by SRT, EOD and MOD'
         step_count = 3
@@ -800,7 +800,7 @@ def get_default_plan_steps(team, plan_type, target_team, standby_team, escalatio
         all_steps[2][0]['target'] = standby_escalation_team
     elif plan_type == 'withmod-standby':
         if not escalation_team:
-            logger.error("Missing escalation_team for plan %s", team)
+            logger.error("Missing escalation_team for plan %s", plan_name)
         plan_description = 'Standby plan with escalation (24x7)'
         step_count = 3
         all_steps = copy.deepcopy(default_standby_plan_steps)
@@ -812,8 +812,9 @@ def get_default_plan_steps(team, plan_type, target_team, standby_team, escalatio
         all_steps[0][0]['target'] = target_team
         plan_description = 'Simple plan without escalation (' + plan_type.split('-')[-1] + ')'
     else:
-        logger.warn("No such plan type %s for %s", plan_type, team)
+        logger.warn("No such plan type %s for %s", plan_type, plan_name)
     return plan_description, step_count, all_steps
+
 
 # Provision a default scrum team plan
 def create_plan(engine, team, plan_name, all_steps, step_count, plan_description):
@@ -1001,10 +1002,10 @@ def update_user(engine, username, iris_users, oncall_users, modes):
 
 
 # Return default plans for teams we manage
-def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
+def get_default_plans(space_to_srt_mapping, plan_name, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
     plans = []
 
-    sane_name = team.replace(immutable_suffix, "")
+    sane_name = plan_name.replace(immutable_suffix, "")
     bol_teamname = sane_name.split('-')[0]
 
     private_24x7_planname = bol_teamname + '-24x7' + private_suffix + immutable_suffix
@@ -1023,7 +1024,7 @@ def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams,
         withmod_teamname = bol_teamname + '-workhours' + immutable_suffix
         escalation_team = mod_team + '-24x7' + immutable_suffix
 
-        plan_description, step_count, all_steps = get_default_plan_steps(team, 'withmod-standby', withmod_teamname, None, escalation_team, None)
+        plan_description, step_count, all_steps = get_default_plan_steps(plan_name, 'withmod-standby', withmod_teamname, None, escalation_team, None)
         plans.append({
             'name': withmod_planname,
             'description': plan_description,
@@ -1036,7 +1037,7 @@ def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams,
         withmod_businesshours_planname = bol_teamname + '-businesshours' + mod_suffix + immutable_suffix
         withmod_businesshours_teamname = bol_teamname + '-workhours' + immutable_suffix
         escalation_team = mod_team + '-businesshours' + immutable_suffix
-        plan_description, step_count, all_steps = get_default_plan_steps(team, 'withmod-standby', withmod_businesshours_teamname, None, escalation_team, None)
+        plan_description, step_count, all_steps = get_default_plan_steps(plan_name, 'withmod-standby', withmod_businesshours_teamname, None, escalation_team, None)
         plans.append({
             'name': withmod_businesshours_planname,
             'description': plan_description,
@@ -1047,7 +1048,7 @@ def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams,
     elif bol_teamname in standby_escalation_teams:
         # private 24x7 is default
         pass
-    elif team.startswith(scrumteam_prefix):
+    elif plan_name.startswith(scrumteam_prefix):
         if bol_teamname in scrumteams:
             # lookup supporting srt
             space = scrumteams[bol_teamname]['space']
@@ -1060,7 +1061,7 @@ def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams,
             standby_team = middleware_team + '-standby' + immutable_suffix
             standby_escalation_team = mod_team + '-standby' + immutable_suffix
 
-            plan_description, step_count, all_steps = get_default_plan_steps(team, 'withsrt-24x7', withsrt_teamname, standby_team, escalation_team, standby_escalation_team)
+            plan_description, step_count, all_steps = get_default_plan_steps(plan_name, 'withsrt-24x7', withsrt_teamname, standby_team, escalation_team, standby_escalation_team)
             plans.append({
                 'name': withsrt_planname,
                 'description': plan_description,
@@ -1075,7 +1076,7 @@ def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams,
             escalation_team = srt
             standby_team = middleware_team + '-businesshours' + immutable_suffix
             standby_escalation_team = mod_team + '-businesshours' + immutable_suffix
-            plan_description, step_count, all_steps = get_default_plan_steps(team, 'withsrt-24x7', withsrt_businesshours_teamname, standby_team, escalation_team, standby_escalation_team)
+            plan_description, step_count, all_steps = get_default_plan_steps(plan_name, 'withsrt-24x7', withsrt_businesshours_teamname, standby_team, escalation_team, standby_escalation_team)
             plans.append({
                 'name': withsrt_businesshours_planname,
                 'description': plan_description,
@@ -1083,9 +1084,11 @@ def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams,
                 'all_steps': all_steps,
                 'type': 'withsrt-businesshours',
             })
+        else:
+            logger.error("Unknown plan naming convention for %s", plan_name)
 
         # private 24x7, businesshours and workhours
-        plan_description, step_count, all_steps = get_default_plan_steps(team, 'private-24x7', private_24x7_teamname, None, None, None)
+        plan_description, step_count, all_steps = get_default_plan_steps(plan_name, 'private-24x7', private_24x7_teamname, None, None, None)
         plans.append({
             'name': private_24x7_planname,
             'description': plan_description,
@@ -1093,7 +1096,7 @@ def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams,
             'all_steps': all_steps,
             'type': 'private-24x7',
         })
-        plan_description, step_count, all_steps = get_default_plan_steps(team, 'private-businesshours', private_businesshours_teamname, None, None, None)
+        plan_description, step_count, all_steps = get_default_plan_steps(plan_name, 'private-businesshours', private_businesshours_teamname, None, None, None)
         plans.append({
             'name': private_businesshours_planname,
             'description': plan_description,
@@ -1101,7 +1104,7 @@ def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams,
             'all_steps': all_steps,
             'type': 'private-businesshours',
         })
-        plan_description, step_count, all_steps = get_default_plan_steps(team, 'private-workhours', private_workhours_teamname, None, None, None)
+        plan_description, step_count, all_steps = get_default_plan_steps(plan_name, 'private-workhours', private_workhours_teamname, None, None, None)
         plans.append({
             'name': private_workhours_planname,
             'description': plan_description,
