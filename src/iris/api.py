@@ -18,10 +18,13 @@ import jinja2
 from jinja2.sandbox import SandboxedEnvironment
 from urlparse import parse_qs
 import ujson
-from falcon import HTTP_200, HTTP_201, HTTP_204, HTTPBadRequest, HTTPNotFound, HTTPUnauthorized, HTTPForbidden, HTTPFound, HTTPInternalServerError, API
+from falcon import (HTTP_200, HTTP_201, HTTP_204, HTTPBadRequest,
+                    HTTPNotFound, HTTPUnauthorized, HTTPForbidden, HTTPFound,
+                    HTTPInternalServerError, API)
 from falcon_cors import CORS
 from sqlalchemy.exc import IntegrityError
 import falcon.uri
+import falcon
 
 from collections import defaultdict
 from streql import equals
@@ -3167,6 +3170,57 @@ class User(object):
         resp.body = ujson.dumps(user_data)
 
 
+class ValidTarget(object):
+    allow_read_no_auth = False
+    enforce_user = False
+
+    def on_get(self, req, resp, target_type):
+        valid_target_query = '''SELECT EXISTS(
+                                    SELECT 1
+                                    FROM `target`
+                                    WHERE `target`.`name` = %s)'''
+
+        try:
+            resp.body = ujson.dumps({'exists':
+                                     bool(db.engine.execute(valid_target_query,
+                                                            target_type).scalar())})
+        except Exception:
+            logger.exception('Error checking Valid Target for %s', target_type)
+            raise HTTPInternalServerError('Failed checking valid target')
+
+
+class UserMembership(object):
+    allow_read_no_auth = False
+    enforce_user = False
+
+    def on_get(self, req, resp, username):
+        lists = req.get_param_as_list('list', required=True)
+
+        membership_query = '''SELECT EXISTS(
+                                  SELECT 1
+                                  FROM `target`
+                                  WHERE `target`.`name` = %s
+                                  AND `target`.`id` IN (
+                                      SELECT `mailing_list_membership`.`user_id`
+                                      FROM `mailing_list_membership`
+                                      WHERE `list_id` IN (
+                                          SELECT `_target`.`id`
+                                          FROM `target` AS `_target`
+                                          JOIN `target_type`
+                                          ON `_target`.`type_id` = `target_type`.`id`
+                                          WHERE `target_type`.`name` = 'mailing-list'
+                                          AND `_target`.`name` IN %s)))'''
+
+        try:
+            resp.body = ujson.dumps({'is_member':
+                                     bool(db.engine.execute(membership_query,
+                                                            (username,
+                                                             lists)).scalar())})
+        except Exception:
+            logger.exception('Error checking lists membership for target: %s, lists: %s', username, lists)
+            raise HTTPInternalServerError('Failed checking group membership')
+
+
 class UserSettings(object):
     allow_read_no_auth = False
     enforce_user = True
@@ -3999,6 +4053,49 @@ class ApplicationStats(object):
         resp.body = ujson.dumps(stats, sort_keys=True)
 
 
+def restrict_apps(req, resp, resource, params):
+    if req.context.get('app', {}).get('name') not in resource.allowed_apps:
+        raise HTTPForbidden('App not allowed to register devices')
+
+
+class Devices(object):
+    allow_read_no_auth = False
+
+    def __init__(self, config):
+        self.allowed_apps = config.get('devices_allowed_apps', [])
+
+    @falcon.before(restrict_apps)
+    def on_post(self, req, resp):
+        data = ujson.loads(req.context['body'])
+        user = data.get('username')
+        registration_id = data.get('registration_id')
+        platform = data.get('platform')
+
+        if user is None or registration_id is None or os is None:
+            raise HTTPBadRequest('Missing parameters for adding device')
+
+        # Open database connection
+        conn = db.engine.raw_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''INSERT IGNORE INTO device (registration_id, user_id, platform)
+                              VALUES (%s,
+                                      (SELECT `id` FROM `target` WHERE `name` = %s
+                                         AND `type_id` = (SELECT `id` FROM `target_type` WHERE `name` = 'user')),
+                                      %s)''',
+                           (registration_id, user, platform))
+        except Exception:
+            logger.exception('Device registration failure for user %s', user)
+            raise HTTPBadRequest('Failed to register device')
+        else:
+            conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
+
+        resp.status = HTTP_201
+
+
 def update_cache_worker():
     while True:
         logger.debug('Reinitializing cache')
@@ -4011,7 +4108,8 @@ def json_error_serializer(req, resp, exception):
     resp.content_type = 'application/json'
 
 
-def construct_falcon_api(debug, healthcheck_path, allowed_origins, iris_sender_app, zk_hosts, default_sender_addr, supported_timezones, config):
+def construct_falcon_api(debug, healthcheck_path, allowed_origins, iris_sender_app,
+                         zk_hosts, default_sender_addr, supported_timezones, config):
     cors = CORS(allow_origins_list=allowed_origins)
     api = API(middleware=[
         ReqBodyMiddleware(),
@@ -4051,6 +4149,9 @@ def construct_falcon_api(debug, healthcheck_path, allowed_origins, iris_sender_a
 
     api.add_route('/v0/modes', Modes())
 
+    api.add_route('/v0/targets/{target_type}/exists', ValidTarget())
+    api.add_route('/v0/users/{username}/in_lists', UserMembership())
+
     api.add_route('/v0/applications/{app_name}/quota', ApplicationQuota())
     api.add_route('/v0/applications/{app_name}/stats', ApplicationStats())
     api.add_route('/v0/applications/{app_name}/key', ApplicationKey())
@@ -4070,6 +4171,10 @@ def construct_falcon_api(debug, healthcheck_path, allowed_origins, iris_sender_a
     api.add_route('/v0/response/twilio/messages', ResponseTwilioMessages(iris_sender_app))
     api.add_route('/v0/response/slack', ResponseSlack(iris_sender_app))
     api.add_route('/v0/twilio/deliveryupdate', TwilioDeliveryUpdate())
+
+    mobile_config = config.get('iris-mobile', {})
+    if mobile_config.get('activated'):
+        api.add_route('/v0/devices', Devices(mobile_config))
 
     api.add_route('/v0/stats', Stats())
 
