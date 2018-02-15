@@ -183,6 +183,9 @@ ignore_plan_fields = [
     'tracking_template',
     'tracking_type',
     'user_id',
+    'type',
+    'team_id',
+    'all_steps',
 ]
 
 stats_reset = {
@@ -635,37 +638,20 @@ def get_target(engine, target):
 
 
 def valid_plan(engine, plan, team, default_plan, plan_type):
-    is_plan = copy.deepcopy(plan)
-    should_plan = copy.deepcopy(default_plan_template)
-    for field in ignore_plan_fields:
-        try:
-            should_plan.pop(field)
-        except KeyError:
-            pass
-        try:
-            is_plan.pop(field)
-        except KeyError:
-            pass
+    is_plan = clean_plan(plan)
+    should_plan = clean_plan(default_plan)
+    retval = True
+    errormsg = ""
 
-    if plan_type == 'withsrt-24x7':
+    should_plan['step_count'] = 1
+    team_target_id = get_target(engine, default_plan['all_steps'][0][0]['target'])
+    hours = plan_type.split('-')[-1]
+
+    if plan_type == 'withsrt-24x7' or plan_type == 'withsrt-businesshours':
         should_plan['step_count'] = 3
         should_plan['description'] = 'Escalation and after hours support by SRT, EOD and MOD'
-        should_plan['team_id'] = None
-
-        if not cmp(should_plan, is_plan) == 0:
-            logger.info("Plan %s needs fixing", plan['plan_active.name'])
-            logger.info("Got: %s", is_plan)
-            logger.info("Should be: %s", should_plan)
-            return False
-
-        # compare plan_notifications
-        is_notification = get_plan_notification(engine, plan['id'])
-        if not is_notification:
-            logger.info("No plan notifications found for: %s", plan['id'])
-            return False
 
         # plan notification expected values
-        team_target_id = get_target(engine, default_plan['all_steps'][0][0]['target'])
         eod_target_id = get_target(engine, default_plan['all_steps'][0][1]['target'])
         srt_target_id = get_target(engine, default_plan['all_steps'][1][0]['target'])
         mod_target_id = get_target(engine, default_plan['all_steps'][2][0]['target'])
@@ -676,23 +662,81 @@ def valid_plan(engine, plan, team, default_plan, plan_type):
         should_notification[1][0]['target'] = srt_target_id
         should_notification[1][1]['target'] = eod_target_id
         should_notification[2][0]['target'] = mod_target_id
+    elif plan_type == 'withmod-standby' or plan_type == 'withmod-businesshours':
+        should_plan['step_count'] = 3
+        should_plan['description'] = 'Standby plan with escalation (24x7)'
 
-        for steplevel, list_of_steps in enumerate(should_notification):
-            # we don't care about ordering, so we reverse the check as well
-            if list_of_steps != is_notification[steplevel] and list_of_steps[::-1] != is_notification[steplevel]:
-                logger.info("not the same")
-                logger.info("should: %s", list_of_steps)
-                logger.info("is: %s", is_notification[steplevel])
-                return False
-    # TODO
-    elif plan_type == 'withmod-standby':
-        pass
+        mod_target_id = get_target(engine, default_plan['all_steps'][1][0]['target'])
+
+        should_notification = copy.deepcopy(default_standby_plan_steps)
+        should_notification[0][0]['target'] = team_target_id
+        should_notification[1][0]['target'] = mod_target_id
+        should_notification[2][0]['target'] = mod_target_id
     elif plan_type == 'private-workhours':
-        pass
+        should_plan['description'] = 'Simple plan without escalation ({})'.format(hours)
+
+        should_notification = copy.deepcopy(default_private_plan_steps)
+        should_notification[0][0]['target'] = team_target_id
     elif plan_type == 'private-businesshours':
-        pass
+        should_plan['description'] = 'Simple plan without escalation ({})'.format(hours)
+
+        should_notification = copy.deepcopy(default_private_plan_steps)
+        should_notification[0][0]['target'] = team_target_id
     elif plan_type == 'private-24x7':
-        pass
+        should_plan['description'] = 'Simple plan without escalation ({})'.format(hours)
+
+        should_notification = copy.deepcopy(default_private_plan_steps)
+        should_notification[0][0]['target'] = team_target_id
+    else:
+        logger.error('Unknown plan type: %s for plan id: %s', plan_type, plan['id'])
+        sys.exit(1)
+
+    # compare plan metadata
+    if not same_plan(should_plan, is_plan):
+        retval = False
+
+    # compare plan_notifications
+    is_notification = get_plan_notification(engine, plan['id'])
+    if not is_notification:
+        errormsg = "No plan notifications found for: {}".format(plan['id'])
+        retval = False
+    else:
+        for steplevel, list_of_steps in enumerate(should_notification):
+            if not same_steps(list_of_steps, is_notification[steplevel]):
+                retval = False
+
+    if not retval and errormsg:
+        logger.info(errormsg)
+
+    return retval
+
+
+# remove fields ignored for comparison
+def clean_plan(plan):
+    clean_plan = copy.deepcopy(plan)
+    for field in ignore_plan_fields:
+        try:
+            clean_plan.pop(field)
+        except KeyError:
+            pass
+    return clean_plan
+
+
+def same_plan(is_plan, should_plan):
+    if not cmp(should_plan, is_plan) == 0:
+        logger.info("Got: %s", is_plan)
+        logger.info("Should be: %s", should_plan)
+        return False
+    return True
+
+
+def same_steps(is_step, should_step):
+    # we don't care about ordering, so we reverse the check as well
+    if should_step != is_step and should_step[::-1] != is_step:
+        logger.info("not the same")
+        logger.info("should: %s", should_step)
+        logger.info("is: %s", is_step)
+        return False
     return True
 
 
@@ -736,7 +780,7 @@ def fetch_plans(engine):
 
 def get_default_plan_steps(team, plan_type, target_team, standby_team, escalation_team, standby_escalation_team):
     plan_description = ""
-    step_count = 0
+    step_count = 1
     all_steps = []
     if plan_type == 'withsrt-24x7':
         if not standby_team:
@@ -767,7 +811,6 @@ def get_default_plan_steps(team, plan_type, target_team, standby_team, escalatio
         all_steps = copy.deepcopy(default_private_plan_steps)
         all_steps[0][0]['target'] = target_team
         plan_description = 'Simple plan without escalation (' + plan_type.split('-')[-1] + ')'
-        step_count = 0
     else:
         logger.warn("No such plan type %s for %s", plan_type, team)
     return plan_description, step_count, all_steps
@@ -983,7 +1026,7 @@ def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams,
         plan_description, step_count, all_steps = get_default_plan_steps(team, 'withmod-standby', withmod_teamname, None, escalation_team, None)
         plans.append({
             'name': withmod_planname,
-            'plan_description': plan_description,
+            'description': plan_description,
             'step_count': step_count,
             'all_steps': all_steps,
             'type': 'withmod-standby',
@@ -996,7 +1039,7 @@ def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams,
         plan_description, step_count, all_steps = get_default_plan_steps(team, 'withmod-standby', withmod_businesshours_teamname, None, escalation_team, None)
         plans.append({
             'name': withmod_businesshours_planname,
-            'plan_description': plan_description,
+            'description': plan_description,
             'step_count': step_count,
             'all_steps': all_steps,
             'type': 'withmod-businesshours',
@@ -1020,7 +1063,7 @@ def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams,
             plan_description, step_count, all_steps = get_default_plan_steps(team, 'withsrt-24x7', withsrt_teamname, standby_team, escalation_team, standby_escalation_team)
             plans.append({
                 'name': withsrt_planname,
-                'plan_description': plan_description,
+                'description': plan_description,
                 'step_count': step_count,
                 'all_steps': all_steps,
                 'type': 'withsrt-24x7',
@@ -1035,7 +1078,7 @@ def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams,
             plan_description, step_count, all_steps = get_default_plan_steps(team, 'withsrt-24x7', withsrt_businesshours_teamname, standby_team, escalation_team, standby_escalation_team)
             plans.append({
                 'name': withsrt_businesshours_planname,
-                'plan_description': plan_description,
+                'description': plan_description,
                 'step_count': step_count,
                 'all_steps': all_steps,
                 'type': 'withsrt-businesshours',
@@ -1045,7 +1088,7 @@ def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams,
         plan_description, step_count, all_steps = get_default_plan_steps(team, 'private-24x7', private_24x7_teamname, None, None, None)
         plans.append({
             'name': private_24x7_planname,
-            'plan_description': plan_description,
+            'description': plan_description,
             'step_count': step_count,
             'all_steps': all_steps,
             'type': 'private-24x7',
@@ -1053,7 +1096,7 @@ def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams,
         plan_description, step_count, all_steps = get_default_plan_steps(team, 'private-businesshours', private_businesshours_teamname, None, None, None)
         plans.append({
             'name': private_businesshours_planname,
-            'plan_description': plan_description,
+            'description': plan_description,
             'step_count': step_count,
             'all_steps': all_steps,
             'type': 'private-businesshours',
@@ -1061,7 +1104,7 @@ def get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams,
         plan_description, step_count, all_steps = get_default_plan_steps(team, 'private-workhours', private_workhours_teamname, None, None, None)
         plans.append({
             'name': private_workhours_planname,
-            'plan_description': plan_description,
+            'description': plan_description,
             'step_count': step_count,
             'all_steps': all_steps,
             'type': 'private-workhours',
@@ -1169,7 +1212,7 @@ def sync_from_oncall(config, engine, purge_old_users=True):
     # Provision default plans for our new targets
     for team in bol_teams:
         for plan in get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
-            create_plan(engine, team, plan['name'], plan['all_steps'], plan['step_count'], plan['plan_description'])
+            create_plan(engine, team, plan['name'], plan['all_steps'], plan['step_count'], plan['description'])
 
 
     # Update plans
@@ -1177,7 +1220,7 @@ def sync_from_oncall(config, engine, purge_old_users=True):
         for default_plan in get_default_plans(space_to_srt_mapping, team, platform_teams, standby_teams, standby_escalation_teams, scrumteams):
             actual_plan = get_plan(engine, default_plan['name'])
             if not actual_plan or not valid_plan(engine, actual_plan, team, default_plan, default_plan['type']):
-                create_plan(engine, team, default_plan['name'], default_plan['all_steps'], default_plan['step_count'], default_plan['plan_description'])
+                create_plan(engine, team, default_plan['name'], default_plan['all_steps'], default_plan['step_count'], default_plan['description'])
 
 
     # Mark users/teams/plans inactive
